@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+
 import {
   METAL_TYPES,
   METAL_TYPE_MAP,
@@ -23,6 +24,10 @@ import {
   createAnnouncement,
   updateAnnouncement,
   trimAnnouncements,
+  listCustomMetals,
+  createCustomMetal,
+  updateCustomMetal,
+  deleteCustomMetal,
 } from './utils/db.js';
 import { getFixedValue } from './utils/index.js';
 import {
@@ -30,14 +35,12 @@ import {
   dispatchCurrentPriceNotify,
 } from './dispatch/index.js';
 import { randomInt } from 'crypto';
-
 // 获取当前文件的目录路径
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const CONFIG_KEY = process.env.CONFIG_KEY || '';
-console.log('CONFIG_KEY:', CONFIG_KEY);
 
 function isValidConfigKey(key) {
   return key && CONFIG_KEY && key === CONFIG_KEY;
@@ -126,6 +129,44 @@ async function getAllMetalRawData(timeParam) {
   }
 }
 
+function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, offsetStep) {
+  if (prevPrice === null || prevPrice === undefined) {
+    return true;
+  }
+  if (currentPrice === prevPrice) {
+    return false;
+  }
+  if (currentPrice === -1 || prevPrice === -1) {
+    return true;
+  }
+  if (Number.isNaN(rawPrice)) {
+    return false;
+  }
+
+  const direction = currentPrice > prevPrice ? 'up' : 'down';
+
+  if (direction === 'up') {
+    // 检查原始金额 -0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
+    const newRawValue = rawPrice - 0.25
+    const newValue = getFixedValue(direction, newRawValue, roundStep, offsetStep);
+    console.log('上涨newValue', newValue, 'currentPrice', currentPrice);
+    if(newValue ===currentPrice) {
+      return true;
+    }else{
+      return false;
+    }
+  }
+  // 检查原始金额 +0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
+  const newRawValue = rawPrice + 0.25
+  const newValue = getFixedValue(direction, newRawValue, roundStep, offsetStep);
+  console.log('下跌newValue', newValue, 'currentPrice', currentPrice);
+  if(newValue ===currentPrice) {
+    return true;
+  }else{
+    return false;
+  }
+}
+
 async function triggerPriceUpdate(typeKeys) {
   try {
     const now = new Date();
@@ -145,8 +186,8 @@ async function triggerPriceUpdate(typeKeys) {
 
     for (const typeKey of uniqueTypeKeys) {
       const rawData = rawMetalData[typeKey];
-      const config = allConfigs[typeKey] || { minUp: 10, minDown: 10 };
-      await checkAndSaveMetalPrice(typeKey, rawData, config);
+      const config = allConfigs[typeKey] || { minUp: 10, minDown: 10, fixedStep: 5 };
+      await checkAndSaveMetalPrice(typeKey, rawData, config, true);
     }
   } catch (error) {
     console.error('配置更新触发价格检查失败:', error);
@@ -154,13 +195,17 @@ async function triggerPriceUpdate(typeKeys) {
 }
 
 // 检查并保存金属价格变化
-async function checkAndSaveMetalPrice(typeKey, rawData, config) {
+async function checkAndSaveMetalPrice(typeKey, rawData, config, triggeredByConfig = false) {
   if (!rawData) return null;
 
   const sellDisabled = Number(config.minUp) === -1;
   const recycleDisabled = Number(config.minDown) === -1;
-  const currentSellPrice = sellDisabled ? -1 : parseFloat(getFixedValue('up', rawData.salePrice, config.minUp));
-  const currentRecyclePrice = recycleDisabled ? -1 : parseFloat(getFixedValue('down', rawData.buyPrice, config.minDown));
+  const currentSellPrice = sellDisabled
+    ? -1
+    : parseFloat(getFixedValue('up', rawData.salePrice, config.fixedStep, config.minUp));
+  const currentRecyclePrice = recycleDisabled
+    ? -1
+    : parseFloat(getFixedValue('down', rawData.buyPrice, config.fixedStep, config.minDown));
   const rawSellPrice = parseFloat(rawData.salePrice);
   const rawRecyclePrice = parseFloat(rawData.buyPrice);
 
@@ -169,15 +214,22 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config) {
   let priceChanged = false;
   let prevSellPrice = null;
   let prevRecyclePrice = null;
+  let sellChanged = false;
+  let recycleChanged = false;
 
   if (!latestPrice) {
     priceChanged = true;
   } else {
     prevSellPrice = parseFloat(latestPrice.sellPrice);
     prevRecyclePrice = parseFloat(latestPrice.recyclePrice);
-    if (currentSellPrice !== prevSellPrice || currentRecyclePrice !== prevRecyclePrice) {
-      priceChanged = true;
+    if (triggeredByConfig) {
+      sellChanged = currentSellPrice !== prevSellPrice;
+      recycleChanged = currentRecyclePrice !== prevRecyclePrice;
+    } else {
+      sellChanged = isConfirmedPriceChange(currentSellPrice, prevSellPrice, rawSellPrice, config.fixedStep, config.minUp);
+      recycleChanged = isConfirmedPriceChange(currentRecyclePrice, prevRecyclePrice, rawRecyclePrice, config.fixedStep, config.minDown);
     }
+    priceChanged = sellChanged || recycleChanged;
   }
 
   // 获取中文名称用于显示
@@ -199,6 +251,8 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config) {
     if (prevSellPrice !== null) {
       if (currentSellPrice !== prevSellPrice && currentSellPrice !== -1 && prevSellPrice !== -1) {
         dispatchNotify({
+          typeKey,
+          metalType,
           typeText: `${metalType}售卖`,
           realTimeValue: rawData.salePrice,
           beforeValue: prevSellPrice,
@@ -208,6 +262,8 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config) {
       }
       if (currentRecyclePrice !== prevRecyclePrice && currentRecyclePrice !== -1 && prevRecyclePrice !== -1) {
         dispatchNotify({
+          typeKey,
+          metalType,
           typeText: `${metalType}回收`,
           realTimeValue: rawData.buyPrice,
           beforeValue: prevRecyclePrice,
@@ -238,7 +294,7 @@ async function scheduledPriceCheck() {
     if (rawMetalData) {
       for (const typeKey of METAL_TYPES) {
         const rawData = rawMetalData[typeKey];
-        const config = allConfigs[typeKey] || { minUp: 10, minDown: 10 };
+        const config = allConfigs[typeKey] || { minUp: 10, minDown: 10, fixedStep: 5 };
         await checkAndSaveMetalPrice(typeKey, rawData, config);
       }
     }
@@ -291,12 +347,33 @@ function scheduleDaily9AMCheck() {
     try {
       console.log(`执行每日9点金价检查：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       const latestPrices = await getLatestAllPrices();
-      const goldPrice = latestPrices[GOLD_TYPE_KEY];
-      if (goldPrice) {
+      const formattedPrice = METAL_TYPES.map((typeKey) => {
+        const price = latestPrices[typeKey];
+        if (!price) {
+          return null;
+        }
+        return {
+          name: getMetalName(typeKey),
+          sellPrice: price.sellPrice,
+          buyBackPrice: price.recyclePrice,
+          updateTime: price.changeTime,
+        };
+      }).filter(Boolean);
+
+      const customMetals = await listCustomMetals();
+      const customPriceList = (customMetals || []).map((item) => ({
+        name: item.name,
+        sellPrice: item.sellPrice,
+        buyBackPrice: item.recyclePrice,
+        updateTime: item.updatedAt,
+      }));
+
+      const mergedPriceList = [...formattedPrice, ...customPriceList];
+
+      if (mergedPriceList.length > 0) {
         dispatchCurrentPriceNotify({
-          sellPrice: goldPrice.sellPrice,
-          buyBackPrice: goldPrice.recyclePrice,
-          updateTime: goldPrice.changeTime,
+          priceList: mergedPriceList,
+          updateTime: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
         });
       } else {
         console.log('每日9点金价检查 - 暂无金价记录');
@@ -313,6 +390,7 @@ function scheduleDaily9AMCheck() {
 app.get('/api/config', async (req, res) => {
   try {
     const config = await getLatestConfig();
+    const customMetals = await listCustomMetals();
     // 转换为前端友好的格式
     const formattedConfig = {};
     for (const typeKey in config) {
@@ -321,7 +399,7 @@ app.get('/api/config', async (req, res) => {
         name: getMetalName(typeKey)
       };
     }
-    res.json(formattedConfig);
+    res.json({ ...formattedConfig, customMetals });
   } catch (error) {
     console.error('获取配置失败:', error);
     res.status(500).json({ error: '获取配置失败' });
@@ -339,7 +417,7 @@ app.post('/api/config/verify', express.json(), (req, res) => {
 // 配置接口 - POST 更新配置
 app.post('/api/config', express.json(), async (req, res) => {
   try {
-    const { metalType, minUp, minDown, updateTime, key } = req.body;
+    const { metalType, minUp, minDown, fixedStep, updateTime, key } = req.body;
 
     if (!isValidConfigKey(key)) {
       return res.status(403).json({ error: '密钥无效，无法修改配置' });
@@ -354,12 +432,15 @@ app.post('/api/config', express.json(), async (req, res) => {
 
     const minUpValue = parseFloat(minUp);
     const minDownValue = parseFloat(minDown);
+    const fixedStepValue = parseFloat(fixedStep);
 
     if (
       Number.isNaN(minUpValue) ||
       Number.isNaN(minDownValue) ||
+      Number.isNaN(fixedStepValue) ||
       minUpValue < -1 ||
-      minDownValue < -1
+      minDownValue < -1 ||
+      fixedStepValue <= 0
     ) {
       return res.status(400).json({ error: '配置值无效' });
     }
@@ -367,6 +448,7 @@ app.post('/api/config', express.json(), async (req, res) => {
     const config = await saveConfig(typeKey, {
       minUp: minUpValue,
       minDown: minDownValue,
+      fixedStep: fixedStepValue,
       updateTime: updateTime || new Date().toISOString().replace('T', ' ').substring(0, 19),
     });
 
@@ -398,6 +480,7 @@ app.post('/api/config/batch', express.json(), async (req, res) => {
         metalType: typeKey,
         minUp: parseFloat(item.minUp),
         minDown: parseFloat(item.minDown),
+        fixedStep: parseFloat(item.fixedStep),
         updateTime: item.updateTime || nowTime,
       };
     });
@@ -409,8 +492,10 @@ app.post('/api/config/batch', express.json(), async (req, res) => {
       if (
         Number.isNaN(config.minUp) ||
         Number.isNaN(config.minDown) ||
+        Number.isNaN(config.fixedStep) ||
         config.minUp < -1 ||
-        config.minDown < -1
+        config.minDown < -1 ||
+        config.fixedStep <= 0
       ) {
         return res.status(400).json({ error: '配置值无效' });
       }
@@ -422,6 +507,82 @@ app.post('/api/config/batch', express.json(), async (req, res) => {
   } catch (error) {
     console.error('批量更新配置失败:', error);
     res.status(500).json({ error: '批量更新配置失败', details: error?.message });
+  }
+});
+
+app.post('/api/custom-metals/create', express.json(), async (req, res) => {
+  try {
+    const { key, name, sellPrice, recyclePrice } = req.body || {};
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效，无法修改配置' });
+    }
+    if (!name || name.trim().length === 0) {
+      return res.status(400).json({ error: '金属名称不能为空' });
+    }
+    const sell = parseFloat(sellPrice);
+    const recycle = parseFloat(recyclePrice);
+    if (Number.isNaN(sell) || Number.isNaN(recycle) || sell < -1 || recycle < -1) {
+      return res.status(400).json({ error: '价格值无效' });
+    }
+    const updatedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const saved = await createCustomMetal({
+      name: name.trim(),
+      sellPrice: sell,
+      recyclePrice: recycle,
+      updatedAt,
+    });
+    res.json({ success: true, metal: saved });
+  } catch (error) {
+    console.error('新增自定义金属失败:', error);
+    res.status(500).json({ error: '新增自定义金属失败' });
+  }
+});
+
+app.post('/api/custom-metals/update', express.json(), async (req, res) => {
+  try {
+    const { key, id, name, sellPrice, recyclePrice } = req.body || {};
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效，无法修改配置' });
+    }
+    if (!id) {
+      return res.status(400).json({ error: '缺少自定义金属 ID' });
+    }
+    if (!name || name.trim().length === 0) {
+      return res.status(400).json({ error: '金属名称不能为空' });
+    }
+    const sell = parseFloat(sellPrice);
+    const recycle = parseFloat(recyclePrice);
+    if (Number.isNaN(sell) || Number.isNaN(recycle) || sell < -1 || recycle < -1) {
+      return res.status(400).json({ error: '价格值无效' });
+    }
+    const updatedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const saved = await updateCustomMetal(id, {
+      name: name.trim(),
+      sellPrice: sell,
+      recyclePrice: recycle,
+      updatedAt,
+    });
+    res.json({ success: true, metal: saved });
+  } catch (error) {
+    console.error('更新自定义金属失败:', error);
+    res.status(500).json({ error: '更新自定义金属失败' });
+  }
+});
+
+app.post('/api/custom-metals/delete', express.json(), async (req, res) => {
+  try {
+    const { key, id } = req.body || {};
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效，无法修改配置' });
+    }
+    if (!id) {
+      return res.status(400).json({ error: '缺少自定义金属 ID' });
+    }
+    await deleteCustomMetal(id);
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('删除自定义金属失败:', error);
+    res.status(500).json({ error: '删除自定义金属失败' });
   }
 });
 
@@ -507,7 +668,6 @@ app.post('/api/announcements/update', express.json(), async (req, res) => {
 app.get('/api/latest-price', async (req, res) => {
   try {
     const latestPrices = await getLatestAllPrices();
-    const allConfigs = await getLatestConfig();
 
     const formattedPrice = METAL_TYPES.map(typeKey => {
       const price = latestPrices[typeKey];
@@ -525,8 +685,21 @@ app.get('/api/latest-price', async (req, res) => {
       return null;
     }).filter(Boolean);
 
-    if (formattedPrice.length > 0) {
-      res.json({ priceList: formattedPrice });
+    const customMetals = await listCustomMetals();
+    const customPriceList = (customMetals || []).map((item) => ({
+      type: `custom_${item.id}`,
+      name: item.name,
+      recyclePrice: item.recyclePrice,
+      sellPrice: item.sellPrice,
+      updateTime: item.updatedAt,
+      rawRecyclePrice: null,
+      rawSellPrice: null,
+    }));
+
+    const mergedPriceList = [...formattedPrice, ...customPriceList];
+
+    if (mergedPriceList.length > 0) {
+      res.json({ priceList: mergedPriceList });
     } else {
       res.json({ success: false, message: '暂无记录', priceList: [] });
     }

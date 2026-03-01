@@ -15,6 +15,10 @@ const configKey = ref('');
 const isKeyVerified = ref(false);
 const keyVerifying = ref(false);
 const keyError = ref(null);
+const customMetals = ref([]);
+const customSubmitting = ref(false);
+const customError = ref(null);
+const customSuccess = ref(null);
 
 // 金属类型映射
 const METAL_OPTIONS = [
@@ -32,6 +36,7 @@ const metalConfigs = ref(
     name: metal.label,
     minUp: 10,
     minDown: 10,
+    fixedStep: 5,
   }))
 );
 
@@ -94,9 +99,16 @@ function fetchConfig() {
           if (metalConfig) {
             metalConfig.minUp = config.minUp;
             metalConfig.minDown = config.minDown;
+            metalConfig.fixedStep = config.fixedStep ?? 5;
           }
         }
       });
+      customMetals.value = (res.customMetals || []).map(item => ({
+        id: item.id,
+        name: item.name || '',
+        sellPrice: item.sellPrice ?? '',
+        recyclePrice: item.recyclePrice ?? '',
+      }));
     })
     .catch((err) => {
       console.error('获取配置数据失败:', err);
@@ -171,11 +183,11 @@ function submitAllConfigs() {
 
   // 验证所有配置的合法性
   const invalidConfigs = metalConfigs.value.filter(
-    m => m.minUp < -1 || m.minDown < -1
+    m => m.minUp < -1 || m.minDown < -1 || !m.fixedStep || Number(m.fixedStep) <= 0
   );
   
   if (invalidConfigs.length > 0) {
-    formError.value = '配置值不能小于 -1';
+      formError.value = '配置值无效';
     isSubmitting.value = false;
     return;
   }
@@ -192,6 +204,7 @@ function submitAllConfigs() {
         metalType: metal.metalType,
         minUp: parseFloat(metal.minUp),
         minDown: parseFloat(metal.minDown),
+        fixedStep: parseFloat(metal.fixedStep),
         updateTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
       })),
     }),
@@ -215,6 +228,119 @@ function submitAllConfigs() {
     })
     .finally(() => {
       isSubmitting.value = false;
+    });
+}
+
+function addCustomMetal() {
+  customMetals.value.unshift({
+    id: null,
+    name: '',
+    sellPrice: '',
+    recyclePrice: '',
+  });
+}
+
+function saveCustomMetal(item) {
+  customError.value = null;
+  customSuccess.value = null;
+  if (!isKeyVerified.value || !configKey.value) {
+    customError.value = '请先验证密钥';
+    return;
+  }
+  if (!item.name || item.name.trim().length === 0) {
+    customError.value = '请输入金属名称';
+    return;
+  }
+  const sell = parseFloat(item.sellPrice);
+  const recycle = parseFloat(item.recyclePrice);
+  if (Number.isNaN(sell) || Number.isNaN(recycle) || sell < -1 || recycle < -1) {
+    customError.value = '价格值无效';
+    return;
+  }
+  customSubmitting.value = true;
+  const endpoint = item.id ? '/api/custom-metals/update' : '/api/custom-metals/create';
+  const payload = {
+    key: configKey.value,
+    id: item.id,
+    name: item.name.trim(),
+    sellPrice: sell,
+    recyclePrice: recycle,
+  };
+  fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+    .then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || '保存失败');
+      }
+      return data;
+    })
+    .then((data) => {
+      if (data.metal) {
+        item.id = data.metal.id;
+        item.name = data.metal.name;
+        item.sellPrice = data.metal.sellPrice;
+        item.recyclePrice = data.metal.recyclePrice;
+      }
+      customSuccess.value = '自定义金属已保存';
+      setTimeout(() => {
+        customSuccess.value = null;
+      }, 3000);
+    })
+    .catch((err) => {
+      customError.value = '保存失败：' + err.message;
+    })
+    .finally(() => {
+      customSubmitting.value = false;
+    });
+}
+
+function deleteCustomMetal(item, index) {
+  customError.value = null;
+  customSuccess.value = null;
+  if (!item.id) {
+    customMetals.value.splice(index, 1);
+    return;
+  }
+  if (!isKeyVerified.value || !configKey.value) {
+    customError.value = '请先验证密钥';
+    return;
+  }
+  customSubmitting.value = true;
+  fetch('/api/custom-metals/delete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      key: configKey.value,
+      id: item.id,
+    }),
+  })
+    .then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || '删除失败');
+      }
+      return data;
+    })
+    .then(() => {
+      customMetals.value.splice(index, 1);
+      customSuccess.value = '自定义金属已删除';
+      setTimeout(() => {
+        customSuccess.value = null;
+      }, 3000);
+    })
+    .catch((err) => {
+      customError.value = '删除失败：' + err.message;
+    })
+    .finally(() => {
+      customSubmitting.value = false;
     });
 }
 
@@ -428,6 +554,18 @@ function goBack() {
                       min="-1"
                     />
                   </div>
+
+                <div class="input-row">
+                  <label :for="'fixedStep-' + metal.metalType">单位变价步长</label>
+                  <input
+                    :id="'fixedStep-' + metal.metalType"
+                    type="number"
+                    v-model="metal.fixedStep"
+                    @change="handleConfigChange(metal.metalType)"
+                    step="0.1"
+                    min="0.01"
+                  />
+                </div>
                 </div>
               </div>
             </div>
@@ -447,6 +585,83 @@ function goBack() {
             <p class="config-hint">
               说明：根据各金属的实时价格，按照配置的幅度计算最终的售卖价和回收价
             </p>
+          </div>
+
+          <div class="configs-card custom-configs-card">
+            <div class="card-header">
+              <h2 class="card-title">自定义金属配置</h2>
+              <button class="outline-button" type="button" @click="addCustomMetal">
+                新增条目
+              </button>
+            </div>
+
+            <div v-if="customMetals.length === 0" class="no-data-message">
+              暂无自定义金属配置
+            </div>
+
+            <div v-else class="metal-configs-grid custom-configs-grid">
+              <div
+                v-for="(metal, index) in customMetals"
+                :key="metal.id || `new-${index}`"
+                class="metal-config-item custom-config-item"
+              >
+                <div class="metal-header">
+                  <input
+                    class="name-input"
+                    type="text"
+                    v-model="metal.name"
+                    placeholder="输入金属名称"
+                  />
+                  <span class="metal-type">
+                    {{ metal.id ? `ID ${metal.id}` : '新条目' }}
+                  </span>
+                </div>
+
+                <div class="config-inputs">
+                  <div class="input-row">
+                    <label>售卖价格</label>
+                    <input
+                      type="number"
+                      v-model="metal.sellPrice"
+                      step="0.01"
+                      min="-1"
+                    />
+                  </div>
+
+                  <div class="input-row">
+                    <label>回收价格</label>
+                    <input
+                      type="number"
+                      v-model="metal.recyclePrice"
+                      step="0.01"
+                      min="-1"
+                    />
+                  </div>
+                </div>
+
+                <div class="row-actions">
+                  <button
+                    class="small-button primary"
+                    type="button"
+                    :disabled="customSubmitting"
+                    @click="saveCustomMetal(metal)"
+                  >
+                    保存
+                  </button>
+                  <button
+                    class="small-button danger"
+                    type="button"
+                    :disabled="customSubmitting"
+                    @click="deleteCustomMetal(metal, index)"
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="customError" class="form-error submit-status">{{ customError }}</div>
+            <div v-if="customSuccess" class="form-success submit-status">{{ customSuccess }}</div>
           </div>
         </div>
 
@@ -470,38 +685,40 @@ function goBack() {
             <div v-else-if="!priceHistory[activeHistoryMetal] || priceHistory[activeHistoryMetal].length === 0" class="no-data-message">
               暂无{{ getMetalLabel(activeHistoryMetal) }}价格变化记录
             </div>
-            <table v-else class="history-table">
-              <thead>
-                <tr>
-                  <th>变更时间</th>
-                  <th>回收价</th>
-                  <th>售卖价</th>
-                  <th>源回收</th>
-                  <th>源售卖</th>
-                  <th>回收变化</th>
-                  <th>售卖变化</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="item in priceHistory[activeHistoryMetal]" :key="item.id">
-                  <td>{{ formatDateTime(item.changeTime) }}</td>
-                  <td>{{ formatPriceValue(item.recyclePrice) }}</td>
-                  <td>{{ formatPriceValue(item.sellPrice) }}</td>
-                  <td>{{ item.rawRecyclePrice }}</td>
-                  <td>{{ item.rawSellPrice }}</td>
-                  <td>
-                    <span :class="getDiffClass(item.recyclePrice, item.prevRecyclePrice)">
-                      {{ getPriceDiff(item.recyclePrice, item.prevRecyclePrice) }}
-                    </span>
-                  </td>
-                  <td>
-                    <span :class="getDiffClass(item.sellPrice, item.prevSellPrice)">
-                      {{ getPriceDiff(item.sellPrice, item.prevSellPrice) }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div v-else class="history-table-wrap">
+              <table class="history-table">
+                <thead>
+                  <tr>
+                    <th>变更时间</th>
+                    <th>回收价</th>
+                    <th>售卖价</th>
+                    <th>源回收</th>
+                    <th>源售卖</th>
+                    <th>回收变化</th>
+                    <th>售卖变化</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in priceHistory[activeHistoryMetal]" :key="item.id">
+                    <td>{{ formatDateTime(item.changeTime) }}</td>
+                    <td>{{ formatPriceValue(item.recyclePrice) }}</td>
+                    <td>{{ formatPriceValue(item.sellPrice) }}</td>
+                    <td>{{ item.rawRecyclePrice }}</td>
+                    <td>{{ item.rawSellPrice }}</td>
+                    <td>
+                      <span :class="getDiffClass(item.recyclePrice, item.prevRecyclePrice)">
+                        {{ getPriceDiff(item.recyclePrice, item.prevRecyclePrice) }}
+                      </span>
+                    </td>
+                    <td>
+                      <span :class="getDiffClass(item.sellPrice, item.prevSellPrice)">
+                        {{ getPriceDiff(item.sellPrice, item.prevSellPrice) }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -691,6 +908,18 @@ function goBack() {
   backdrop-filter: blur(6px);
 }
 
+.custom-configs-card {
+  margin-top: 18px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
 .card-title {
   margin: 0 0 18px 0;
   font-size: 1.25rem;
@@ -699,6 +928,29 @@ function goBack() {
   padding-bottom: 12px;
   border-bottom: 2px solid rgba(120, 35, 45, 0.25);
   letter-spacing: 0.8px;
+}
+
+.card-header .card-title {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.outline-button {
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 35, 45, 0.3);
+  background: rgba(255, 255, 255, 0.85);
+  color: #5a1f27;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.outline-button:hover {
+  border-color: rgba(120, 35, 45, 0.45);
+  background: rgba(248, 217, 177, 0.35);
 }
 
 /* 金属配置网格布局 */
@@ -715,6 +967,12 @@ function goBack() {
   padding: 14px;
   border: 1px solid rgba(120, 35, 45, 0.1);
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.custom-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .metal-config-item:hover {
@@ -739,12 +997,26 @@ function goBack() {
   color: #3b1c1f;
 }
 
+.name-input {
+  border: none;
+  background: transparent;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #3b1c1f;
+  width: 100%;
+}
+
+.name-input:focus {
+  outline: none;
+}
+
 .metal-type {
   font-size: 0.7rem;
   color: #6d4a4e;
   background-color: rgba(219, 198, 176, 0.35);
   padding: 3px 6px;
   border-radius: 999px;
+  white-space: nowrap;
 }
 
 .config-inputs {
@@ -845,6 +1117,46 @@ function goBack() {
   box-shadow: none;
 }
 
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.small-button {
+  flex: 1;
+  padding: 10px 0;
+  border-radius: 999px;
+  border: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.small-button.primary {
+  background: linear-gradient(135deg, #8c1a2b 0%, #d08c4a 100%);
+  color: #fff9f1;
+  box-shadow: 0 8px 18px rgba(140, 26, 43, 0.2);
+}
+
+.small-button.danger {
+  background: rgba(168, 27, 38, 0.12);
+  color: #a31f2d;
+  border: 1px solid rgba(168, 27, 38, 0.2);
+}
+
+.small-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.small-button:disabled {
+  background: #e0dad2;
+  color: #9b8c8d;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
 .config-hint {
   margin-top: 16px;
   font-size: 0.8rem;
@@ -858,6 +1170,16 @@ function goBack() {
   gap: 10px;
   margin-bottom: 18px;
   flex-wrap: wrap;
+}
+
+.history-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(120, 35, 45, 0.1);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 12px 26px rgba(32, 16, 18, 0.08);
+  -webkit-overflow-scrolling: touch;
 }
 
 .tab-button {
@@ -886,11 +1208,10 @@ function goBack() {
 
 .history-table {
   width: 100%;
+  min-width: 520px;
   border-collapse: collapse;
   font-size: 0.8rem;
-  overflow-x: auto;
-  background: rgba(255, 255, 255, 0.8);
-  border-radius: 12px;
+  background: transparent;
 }
 
 .history-table th,
@@ -898,10 +1219,11 @@ function goBack() {
   padding: 10px 8px;
   text-align: center;
   border-bottom: 1px solid rgba(120, 35, 45, 0.08);
+  white-space: nowrap;
 }
 
 .history-table th {
-  background: linear-gradient(135deg, rgba(248, 217, 177, 0.9) 0%, rgba(255, 245, 233, 0.9) 100%);
+  background: linear-gradient(135deg, rgba(248, 217, 177, 0.95) 0%, rgba(255, 245, 233, 0.95) 100%);
   color: #3b1c1f;
   font-weight: 700;
   font-size: 0.75rem;

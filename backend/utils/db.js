@@ -68,6 +68,7 @@ function createNewTables() {
       metalType TEXT NOT NULL UNIQUE,
       minUp REAL NOT NULL DEFAULT 10,
       minDown REAL NOT NULL DEFAULT 10,
+      fixedStep REAL NOT NULL DEFAULT 5,
       updateTime TEXT NOT NULL,
       createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -124,6 +125,7 @@ function createNewTables() {
     }
   });
 
+  initCustomMetalTable();
   initAnnouncementTable();
 }
 
@@ -140,8 +142,18 @@ function checkAndMigrateLegacyData() {
     // 检查是否已包含 metalType 字段（新表结构）
     if (oldSchema.includes('metalType')) {
       console.log('已是新表结构，无需迁移');
+      if (!oldSchema.includes('fixedStep')) {
+        db.run('ALTER TABLE metal_config ADD COLUMN fixedStep REAL NOT NULL DEFAULT 5', (alterErr) => {
+          if (alterErr) {
+            console.error('新增配置字段失败:', alterErr.message);
+          } else {
+            db.run('UPDATE metal_config SET fixedStep = 5 WHERE fixedStep IS NULL');
+          }
+        });
+      }
       // 初始化新增的金属历史表
       initNewMetalTables();
+      initCustomMetalTable();
       initAnnouncementTable();
       return;
     }
@@ -170,6 +182,7 @@ function migrateFromLegacy() {
             metalType TEXT NOT NULL UNIQUE,
             minUp REAL NOT NULL DEFAULT 10,
             minDown REAL NOT NULL DEFAULT 10,
+            fixedStep REAL NOT NULL DEFAULT 5,
             updateTime TEXT NOT NULL,
             createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           )
@@ -184,8 +197,8 @@ function migrateFromLegacy() {
             const minDown = Number.isFinite(legacyConfig.minDown) ? legacyConfig.minDown : 10;
             const legacyUpdateTime = legacyConfig.updateTime || updateTime;
             db.run(
-              `INSERT OR REPLACE INTO metal_config (metalType, minUp, minDown, updateTime) VALUES (?, ?, ?, ?)`,
-              ['1_au_1', minUp, minDown, legacyUpdateTime],
+              `INSERT OR REPLACE INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`,
+              ['1_au_1', minUp, minDown, 5, legacyUpdateTime],
               () => {
                 initDefaultMetalConfig();
                 initNewMetalTables();
@@ -199,6 +212,7 @@ function migrateFromLegacy() {
                     createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                   )
                 `);
+                initCustomMetalTable();
                 initAnnouncementTable();
               }
             );
@@ -216,6 +230,7 @@ function migrateFromLegacy() {
               createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
           `);
+          initCustomMetalTable();
           initAnnouncementTable();
         });
       });
@@ -273,6 +288,23 @@ function initAnnouncementTable() {
   });
 }
 
+function initCustomMetalTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS custom_metal (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      sellPrice REAL NOT NULL,
+      recyclePrice REAL NOT NULL,
+      updatedAt TEXT NOT NULL,
+      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `, (err) => {
+    if (err) {
+      console.error('创建自定义金属表失败:', err.message);
+    }
+  });
+}
+
 // 根据金属类型key获取对应的历史表名
 function getTableName(typeKey) {
   const map = {
@@ -300,8 +332,8 @@ function initDefaultMetalConfig() {
       if (!row) {
         const updateTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
         db.run(
-          `INSERT INTO metal_config (metalType, minUp, minDown, updateTime) VALUES (?, ?, ?, ?)`,
-          [typeKey, defaultMinUp[typeKey], defaultMinDown[typeKey], updateTime],
+          `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`,
+          [typeKey, defaultMinUp[typeKey], defaultMinDown[typeKey], 5, updateTime],
           function (err) {
             if (err) {
               console.error(`插入${getMetalName(typeKey)}默认配置失败:`, err.message);
@@ -325,13 +357,14 @@ function getLatestConfig() {
         const config = {};
         // 设置默认配置
         METAL_TYPES.forEach(typeKey => {
-          config[typeKey] = { minUp: 10, minDown: 10 };
+          config[typeKey] = { minUp: 10, minDown: 10, fixedStep: 5 };
         });
         // 填充实际配置
         (rows || []).forEach(row => {
           config[row.metalType] = {
             minUp: row.minUp,
             minDown: row.minDown,
+            fixedStep: row.fixedStep ?? 5,
             name: getMetalName(row.metalType)
           };
         });
@@ -348,7 +381,7 @@ function getConfigByMetalType(typeKey) {
       if (err) {
         reject(err);
       } else {
-        resolve(row || { metalType: typeKey, minUp: 10, minDown: 10 });
+        resolve(row || { metalType: typeKey, minUp: 10, minDown: 10, fixedStep: 5 });
       }
     });
   });
@@ -358,11 +391,11 @@ function getConfigByMetalType(typeKey) {
 function saveConfig(typeKey, config) {
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO metal_config (metalType, minUp, minDown, updateTime) VALUES (?, ?, ?, ?)
-       ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, updateTime = ?`,
+      `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`,
       [
-        typeKey, config.minUp, config.minDown, config.updateTime,
-        config.minUp, config.minDown, config.updateTime
+        typeKey, config.minUp, config.minDown, config.fixedStep, config.updateTime,
+        config.minUp, config.minDown, config.fixedStep, config.updateTime
       ],
       function (err) {
         if (err) {
@@ -387,8 +420,8 @@ function saveConfigsBatch(configs) {
           reject(beginErr);
           return;
         }
-        const sql = `INSERT INTO metal_config (metalType, minUp, minDown, updateTime) VALUES (?, ?, ?, ?)
-           ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, updateTime = ?`;
+        const sql = `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`;
         const stmt = db.prepare(sql, (prepareErr) => {
           if (prepareErr) {
             db.run('ROLLBACK', () => {
@@ -404,9 +437,11 @@ function saveConfigsBatch(configs) {
                 config.metalType,
                 config.minUp,
                 config.minDown,
+                config.fixedStep,
                 config.updateTime,
                 config.minUp,
                 config.minDown,
+                config.fixedStep,
                 config.updateTime,
               ],
               function (err) {
@@ -529,6 +564,62 @@ function getLatestAllPrices() {
     } catch (err) {
       reject(err);
     }
+  });
+}
+
+function listCustomMetals() {
+  return new Promise((resolve, reject) => {
+    db.all(`SELECT * FROM custom_metal ORDER BY id DESC`, (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+}
+
+function createCustomMetal(data) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO custom_metal (name, sellPrice, recyclePrice, updatedAt) VALUES (?, ?, ?, ?)`,
+      [data.name, data.sellPrice, data.recyclePrice, data.updatedAt],
+      function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve({ id: this.lastID, ...data });
+        }
+      }
+    );
+  });
+}
+
+function updateCustomMetal(id, data) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE custom_metal SET name = ?, sellPrice = ?, recyclePrice = ?, updatedAt = ? WHERE id = ?`,
+      [data.name, data.sellPrice, data.recyclePrice, data.updatedAt, id],
+      function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve({ id, ...data });
+        }
+      }
+    );
+  });
+}
+
+function deleteCustomMetal(id) {
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM custom_metal WHERE id = ?`, [id], function (err) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve({ id, removed: this.changes });
+      }
+    });
   });
 }
 
@@ -731,5 +822,9 @@ export {
   getActiveAnnouncements,
   createAnnouncement,
   updateAnnouncement,
-  trimAnnouncements
+  trimAnnouncements,
+  listCustomMetals,
+  createCustomMetal,
+  updateCustomMetal,
+  deleteCustomMetal
 };

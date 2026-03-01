@@ -8,6 +8,10 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  showOrigin: {
+    type: Boolean,
+    default: false,
+  },
   isLoading: {
     type: Boolean,
     default: false,
@@ -25,8 +29,19 @@ function formatPrice(value) {
   return `¥${value}/克`;
 }
 
-function shouldShowOrigin(value, origin) {
-  return formatPrice(value) !== '-' && origin;
+function getOriginValue(item, origin, type) {
+  const rawValue = type === 'recycle' ? item.rawRecyclePrice : item.rawSellPrice;
+  if (rawValue !== null && rawValue !== undefined) {
+    return rawValue;
+  }
+  if (!origin || origin.name !== item.name) {
+    return null;
+  }
+  return type === 'recycle' ? origin.buyPrice : origin.salePrice;
+}
+
+function shouldShowOrigin(value, originValue) {
+  return formatPrice(value) !== '-' && originValue !== null && originValue !== undefined;
 }
 </script>
 
@@ -45,19 +60,29 @@ function shouldShowOrigin(value, origin) {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(item, index) in metalPrices" :key="item.id">
+        <tr v-for="(item, index) in metalPrices" :key="item.type || item.id || index">
           <td>{{ item.name }}</td>
           <td>
             <span class="price-main">{{ formatPrice(item.recyclePrice) }}</span>
-            <span v-if="originList && shouldShowOrigin(item.recyclePrice, originList[index])" class="price-origin">
-              {{ `原价 ${originList[index].buyPrice}` }}
-            </span>
+            <template v-if="showOrigin">
+              <span
+                v-if="shouldShowOrigin(item.recyclePrice, getOriginValue(item, originList[index], 'recycle'))"
+                class="price-origin"
+              >
+                {{ `原价 ${getOriginValue(item, originList[index], 'recycle')}` }}
+              </span>
+            </template>
           </td>
           <td>
             <span class="price-main">{{ formatPrice(item.sellPrice) }}</span>
-            <span v-if="originList && shouldShowOrigin(item.sellPrice, originList[index])" class="price-origin">
-              {{ `原价 ${originList[index].salePrice}` }}
-            </span>
+            <template v-if="showOrigin">
+              <span
+                v-if="shouldShowOrigin(item.sellPrice, getOriginValue(item, originList[index], 'sell'))"
+                class="price-origin"
+              >
+                {{ `原价 ${getOriginValue(item, originList[index], 'sell')}` }}
+              </span>
+            </template>
           </td>
         </tr>
       </tbody>

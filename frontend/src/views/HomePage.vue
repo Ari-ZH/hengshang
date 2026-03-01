@@ -24,6 +24,10 @@ let marqueeObserver = null;
 const marqueeItems = computed(() => (
   shouldScroll.value ? [...announcements.value, ...announcements.value] : announcements.value
 ));
+const shouldShowOrigin = computed(() => {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get('origin') === '1';
+});
 
 function handleLogoClick() {
   const now = Date.now();
@@ -304,6 +308,7 @@ onUnmounted(() => {
         <MetalPriceTable
           :metalPrices="metalPrices"
           :originList="originList"
+          :showOrigin="shouldShowOrigin"
           :isLoading="isLoading"
           :error="error"
         />
