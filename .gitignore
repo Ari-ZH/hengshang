@@ -7,3 +7,4 @@ package-lock.json
 config.db
 backend/static
 logs/
+.env

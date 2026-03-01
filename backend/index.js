@@ -1,41 +1,74 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import {
+  METAL_TYPES,
+  METAL_TYPE_MAP,
+  getMetalName,
+  getMetalTypeKey,
   getLatestConfig,
+  getConfigByMetalType,
   saveConfig,
-  getLatestScheduledGoldPrice,
-  getScheduledGoldPriceHistory,
-  saveScheduledGoldPrice,
+  saveConfigsBatch,
+  getLatestScheduledPrice,
+  saveScheduledPrice,
+  getScheduledPriceHistory,
+  getLatestAllPrices,
+  recordPageVisit,
+  getPageAnalytics,
+  getTotalAnalytics,
+  listAnnouncements,
+  getActiveAnnouncements,
+  createAnnouncement,
+  updateAnnouncement,
+  trimAnnouncements,
 } from './utils/db.js';
-import { transformMetalData } from './utils/index.js';
+import { getFixedValue } from './utils/index.js';
 import {
   dispatchNotify,
   dispatchCurrentPriceNotify,
 } from './dispatch/index.js';
 import { randomInt } from 'crypto';
-import dayjs from 'dayjs';
 
 // 获取当前文件的目录路径
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+
+const CONFIG_KEY = process.env.CONFIG_KEY || '';
+console.log('CONFIG_KEY:', CONFIG_KEY);
+
+function isValidConfigKey(key) {
+  return key && CONFIG_KEY && key === CONFIG_KEY;
+}
+
+function toDateString(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) {
+    return new Date().toISOString().slice(0, 10);
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+// 黄金的类型key（用于9点定时任务推送）
+const GOLD_TYPE_KEY = '1_au_1';
 
 const app = express();
 
 // 添加动态 CORS 中间件
 app.use((req, res, next) => {
-  // 从请求头中获取 Origin
   const origin = req.headers.origin;
-
-  // 允许的源列表
   const allowedOrigins = [
-    'http://localhost:5173', // Vite 开发服务器
-    'http://localhost:3000', // 生产环境或其他环境
+    'http://localhost:5173',
+    'http://localhost:3000',
     'http://127.0.0.1:5173',
     'http://127.0.0.1:3000',
   ];
 
-  // 如果请求源在允许列表中，动态设置 CORS 头
   if (origin && allowedOrigins.includes(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
   }
@@ -47,7 +80,6 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Credentials', 'true');
 
-  // 处理预检请求
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -55,14 +87,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middleware to parse JSON bodies
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 // 定时任务的状态跟踪
 let schedulerRunning = false;
 let schedulerTimeout = null;
 
-async function getGoldRawData(timeParam) {
+// 获取所有金属的原始数据
+async function getAllMetalRawData(timeParam) {
   try {
     const response = await fetch(
       `http://ypjgold.cn/price/data?time=${timeParam}`,
@@ -76,142 +108,162 @@ async function getGoldRawData(timeParam) {
           Referer: 'http://ypjgold.cn/',
           'Referrer-Policy': 'strict-origin-when-cross-origin',
         },
-        body: null,
         method: 'GET',
       }
     );
     const responseData = await response.json();
-    return responseData.data.find((item) => item.name === '黄金');
+    
+    // 直接使用 type 字段匹配
+    const metalDataMap = {};
+    METAL_TYPES.forEach(typeKey => {
+      metalDataMap[typeKey] = responseData.data.find(item => item.type === typeKey);
+    });
+    
+    return metalDataMap;
   } catch (error) {
-    console.error('获取原始黄金价格数据失败:', error);
+    console.error('获取原始金属价格数据失败:', error);
     return null;
   }
 }
 
-// 定时任务函数：检查并记录金价变化
-async function scheduledGoldPriceCheck() {
+async function triggerPriceUpdate(typeKeys) {
   try {
-    // 获取北京时间
     const now = new Date();
-    // 转换为北京时区 (UTC+8)
+    const utcTime = now.getTime() + now.getTimezoneOffset() * 60000;
+    const beijingTime = new Date(utcTime + 3600000 * 8);
+    const timeParam = beijingTime.getTime();
+    const allConfigs = await getLatestConfig();
+    const rawMetalData = await getAllMetalRawData(timeParam);
+
+    if (!rawMetalData) {
+      return;
+    }
+
+    const uniqueTypeKeys = Array.from(new Set(typeKeys)).filter(typeKey =>
+      METAL_TYPES.includes(typeKey)
+    );
+
+    for (const typeKey of uniqueTypeKeys) {
+      const rawData = rawMetalData[typeKey];
+      const config = allConfigs[typeKey] || { minUp: 10, minDown: 10 };
+      await checkAndSaveMetalPrice(typeKey, rawData, config);
+    }
+  } catch (error) {
+    console.error('配置更新触发价格检查失败:', error);
+  }
+}
+
+// 检查并保存金属价格变化
+async function checkAndSaveMetalPrice(typeKey, rawData, config) {
+  if (!rawData) return null;
+
+  const sellDisabled = Number(config.minUp) === -1;
+  const recycleDisabled = Number(config.minDown) === -1;
+  const currentSellPrice = sellDisabled ? -1 : parseFloat(getFixedValue('up', rawData.salePrice, config.minUp));
+  const currentRecyclePrice = recycleDisabled ? -1 : parseFloat(getFixedValue('down', rawData.buyPrice, config.minDown));
+  const rawSellPrice = parseFloat(rawData.salePrice);
+  const rawRecyclePrice = parseFloat(rawData.buyPrice);
+
+  const latestPrice = await getLatestScheduledPrice(typeKey);
+
+  let priceChanged = false;
+  let prevSellPrice = null;
+  let prevRecyclePrice = null;
+
+  if (!latestPrice) {
+    priceChanged = true;
+  } else {
+    prevSellPrice = parseFloat(latestPrice.sellPrice);
+    prevRecyclePrice = parseFloat(latestPrice.recyclePrice);
+    if (currentSellPrice !== prevSellPrice || currentRecyclePrice !== prevRecyclePrice) {
+      priceChanged = true;
+    }
+  }
+
+  // 获取中文名称用于显示
+  const metalType = getMetalName(typeKey);
+
+  if (priceChanged) {
+    const priceRecord = {
+      sellPrice: currentSellPrice,
+      recyclePrice: currentRecyclePrice,
+      rawSellPrice: rawSellPrice,
+      rawRecyclePrice: rawRecyclePrice,
+      prevSellPrice: prevSellPrice,
+      prevRecyclePrice: prevRecyclePrice,
+      changeTime: rawData.time,
+    };
+    await saveScheduledPrice(typeKey, priceRecord);
+    console.log(`定时任务：${metalType}价格变化已记录:`, priceRecord);
+
+    if (prevSellPrice !== null) {
+      if (currentSellPrice !== prevSellPrice && currentSellPrice !== -1 && prevSellPrice !== -1) {
+        dispatchNotify({
+          typeText: `${metalType}售卖`,
+          realTimeValue: rawData.salePrice,
+          beforeValue: prevSellPrice,
+          currentValue: currentSellPrice,
+          updateTime: rawData.time,
+        });
+      }
+      if (currentRecyclePrice !== prevRecyclePrice && currentRecyclePrice !== -1 && prevRecyclePrice !== -1) {
+        dispatchNotify({
+          typeText: `${metalType}回收`,
+          realTimeValue: rawData.buyPrice,
+          beforeValue: prevRecyclePrice,
+          currentValue: currentRecyclePrice,
+          updateTime: rawData.time,
+        });
+      }
+    }
+    return priceRecord;
+  } else {
+    console.log(`定时任务：${metalType}价格未变化`);
+  }
+  return null;
+}
+
+// 定时任务函数：检查所有金属价格变化
+async function scheduledPriceCheck() {
+  try {
+    const now = new Date();
     const utcTime = now.getTime() + now.getTimezoneOffset() * 60000;
     const beijingTime = new Date(utcTime + 3600000 * 8);
     const beijingHour = beijingTime.getHours();
-    // 生成时间戳参数
     const timeParam = beijingTime.getTime();
 
-    // 获取最新配置
-    const config = await getLatestConfig();
+    const allConfigs = await getLatestConfig();
+    const rawMetalData = await getAllMetalRawData(timeParam);
 
-    // 获取原始金价数据
-    const rawGoldData = await getGoldRawData(timeParam);
-
-    if (rawGoldData) {
-      // 转换数据为标准格式
-      const pricesData = transformMetalData(rawGoldData, config);
-
-      // 获取黄金价格数据
-      const goldData = pricesData.find((item) => item.type === '黄金');
-
-      if (goldData) {
-        // 当前金价
-        const currentSellPrice = parseFloat(goldData.sellPrice);
-        const currentRecyclePrice = parseFloat(goldData.recyclePrice);
-        const rawSellPrice = parseFloat(rawGoldData.salePrice);
-        const rawRecyclePrice = parseFloat(rawGoldData.buyPrice);
-
-        // 获取最新一次记录的定时任务金价
-        const latestScheduledPrice = await getLatestScheduledGoldPrice();
-
-        let priceChanged = false;
-        let prevSellPrice = null;
-        let prevRecyclePrice = null;
-
-        // 比较金价是否变化
-        if (!latestScheduledPrice) {
-          // 如果没有历史记录，则记录第一条数据
-          priceChanged = true;
-        } else {
-          prevSellPrice = parseFloat(latestScheduledPrice.sellPrice);
-          prevRecyclePrice = parseFloat(latestScheduledPrice.recyclePrice);
-
-          // 如果卖出价格或回收价格有变化，则标记为变化
-          if (
-            currentSellPrice !== prevSellPrice ||
-            currentRecyclePrice !== prevRecyclePrice
-          ) {
-            priceChanged = true;
-          }
-        }
-
-        // 如果价格变化，保存新记录
-        if (priceChanged) {
-          const priceRecord = {
-            sellPrice: currentSellPrice,
-            recyclePrice: currentRecyclePrice,
-            rawSellPrice: rawSellPrice,
-            rawRecyclePrice: rawRecyclePrice,
-            prevSellPrice: prevSellPrice,
-            prevRecyclePrice: prevRecyclePrice,
-            changeTime: rawGoldData.time,
-          };
-          await saveScheduledGoldPrice(priceRecord);
-          console.log(
-            '定时任务：金价变化已记录:',
-            priceRecord,
-            '时间:',
-            dayjs(beijingTime).format('YYYY-MM-DD HH:mm:ss')
-          );
-          // 使用原有的通知逻辑
-          if (prevSellPrice !== null && currentSellPrice !== prevSellPrice) {
-            dispatchNotify({
-              typeText: '售卖',
-              realTimeValue: rawGoldData.salePrice,
-              beforeValue: prevSellPrice,
-              currentValue: currentSellPrice,
-              updateTime: rawGoldData.time,
-            });
-          }
-          if (
-            prevRecyclePrice !== null &&
-            currentRecyclePrice !== prevRecyclePrice
-          ) {
-            dispatchNotify({
-              typeText: '回收',
-              realTimeValue: rawGoldData.buyPrice,
-              beforeValue: prevRecyclePrice,
-              currentValue: currentRecyclePrice,
-              updateTime: rawGoldData.time,
-            });
-          }
-        } else {
-          console.log(`定时任务：北京时间 ${beijingHour}:${now.getMinutes()}:${now.getSeconds()} 金价未变化`);
-        }
+    if (rawMetalData) {
+      for (const typeKey of METAL_TYPES) {
+        const rawData = rawMetalData[typeKey];
+        const config = allConfigs[typeKey] || { minUp: 10, minDown: 10 };
+        await checkAndSaveMetalPrice(typeKey, rawData, config);
       }
     }
-    // 设置随机间隔 5-10 秒
-    const nextInterval = randomInt(5000, 10001); // 5000-10000ms
-    schedulerTimeout = setTimeout(scheduledGoldPriceCheck, nextInterval);
+
+    const nextInterval = randomInt(5000, 10001);
+    schedulerTimeout = setTimeout(scheduledPriceCheck, nextInterval);
   } catch (error) {
     console.error('定时任务执行出错:', error);
-    // 出错后，继续尝试下一次执行
-    schedulerTimeout = setTimeout(scheduledGoldPriceCheck, 5000);
+    schedulerTimeout = setTimeout(scheduledPriceCheck, 5000);
   }
 }
 
 // 启动定时任务
 function startScheduler() {
   if (!schedulerRunning) {
-    console.log('启动金价监控定时任务');
+    console.log('启动金属价格监控定时任务');
     schedulerRunning = true;
-    scheduledGoldPriceCheck();
+    scheduledPriceCheck();
   }
 }
 
 // 停止定时任务
 function stopScheduler() {
   if (schedulerRunning) {
-    console.log('停止金价监控定时任务');
+    console.log('停止金属价格监控定时任务');
     if (schedulerTimeout) {
       clearTimeout(schedulerTimeout);
       schedulerTimeout = null;
@@ -220,53 +272,38 @@ function stopScheduler() {
   }
 }
 
-// 每日定时任务 - 获取金价历史记录中最新的数据
+// 每日定时任务 - 早上9点推送当前金价
 function scheduleDaily9AMCheck() {
   const now = new Date();
-  // 转换为北京时区 (UTC+8)
   const utcTime = now.getTime() + now.getTimezoneOffset() * 60000;
   const beijingTime = new Date(utcTime + 3600000 * 8);
 
-  // 计算下一个早上9点的时间
   const next9AM = new Date(beijingTime);
   next9AM.setHours(9, 1, 0, 0);
 
-  // 如果当前时间已经过了今天的9点，就设置为明天的9点
   if (beijingTime.getHours() >= 9) {
     next9AM.setDate(next9AM.getDate() + 1);
   }
-  // 计算距离下一个9点还有多少毫秒
   const msToNext9AM = next9AM.getTime() - beijingTime.getTime();
-  console.log(
-    `定时任务已设置：将在 ${next9AM.toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-    })} 获取最新金价数据`
-  );
-  // 设置定时器，在指定时间执行
+  console.log(`定时任务已设置：将在 ${next9AM.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} 获取最新金价数据`);
+
   setTimeout(async function dailyCheck() {
     try {
-      console.log(
-        `执行每日9点金价检查：${new Date().toLocaleString('zh-CN', {
-          timeZone: 'Asia/Shanghai',
-        })}`
-      );
-      // 获取最新金价记录
-      const latestPrice = await getLatestScheduledGoldPrice();
-      if (latestPrice) {
+      console.log(`执行每日9点金价检查：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      const latestPrices = await getLatestAllPrices();
+      const goldPrice = latestPrices[GOLD_TYPE_KEY];
+      if (goldPrice) {
         dispatchCurrentPriceNotify({
-          sellPrice: latestPrice.sellPrice,
-          buyBackPrice: latestPrice.recyclePrice,
-          updateTime: latestPrice.changeTime,
+          sellPrice: goldPrice.sellPrice,
+          buyBackPrice: goldPrice.recyclePrice,
+          updateTime: goldPrice.changeTime,
         });
       } else {
         console.log('每日9点金价检查 - 暂无金价记录');
       }
-
-      // 设置下一个24小时后的检查
       scheduleDaily9AMCheck();
     } catch (error) {
       console.error('每日9点金价检查任务执行出错:', error);
-      // 出错后一小时后重试
       setTimeout(scheduleDaily9AMCheck, 60 * 60 * 1000);
     }
   }, msToNext9AM);
@@ -276,54 +313,64 @@ function scheduleDaily9AMCheck() {
 app.get('/api/config', async (req, res) => {
   try {
     const config = await getLatestConfig();
-    res.json(config);
+    // 转换为前端友好的格式
+    const formattedConfig = {};
+    for (const typeKey in config) {
+      formattedConfig[typeKey] = {
+        ...config[typeKey],
+        name: getMetalName(typeKey)
+      };
+    }
+    res.json(formattedConfig);
   } catch (error) {
     console.error('获取配置失败:', error);
     res.status(500).json({ error: '获取配置失败' });
   }
 });
 
+app.post('/api/config/verify', express.json(), (req, res) => {
+  const { key } = req.body;
+  if (!isValidConfigKey(key)) {
+    return res.status(403).json({ success: false, error: '密钥无效' });
+  }
+  res.json({ success: true });
+});
+
 // 配置接口 - POST 更新配置
 app.post('/api/config', express.json(), async (req, res) => {
   try {
-    const {
-      minUp,
-      minDown,
-      silverRecyclePrice,
-      silverSellPrice,
-      platinumRecyclePrice,
-      platinumSellPrice,
-      porpeziteRecyclePrice,
-      porpeziteSellPrice,
-      silverBarRecyclePrice,
-      silverBarSellPrice,
-      platinumBarRecyclePrice,
-      platinumBarSellPrice,
-      updateTime,
-      key,
-    } = req.body;
+    const { metalType, minUp, minDown, updateTime, key } = req.body;
 
-    // 验证密钥
-    if (!key || key !== 'hengshang') {
+    if (!isValidConfigKey(key)) {
       return res.status(403).json({ error: '密钥无效，无法修改配置' });
     }
 
-    // 保存新配置
-    const config = await saveConfig({
-      minUp: parseFloat(minUp),
-      minDown: parseFloat(minDown),
-      silverRecyclePrice: parseFloat(silverRecyclePrice),
-      silverSellPrice: parseFloat(silverSellPrice),
-      platinumRecyclePrice: parseFloat(platinumRecyclePrice),
-      platinumSellPrice: parseFloat(platinumSellPrice),
-      porpeziteRecyclePrice: parseFloat(porpeziteRecyclePrice),
-      porpeziteSellPrice: parseFloat(porpeziteSellPrice),
-      silverBarRecyclePrice: parseFloat(silverBarRecyclePrice),
-      silverBarSellPrice: parseFloat(silverBarSellPrice),
-      platinumBarRecyclePrice: parseFloat(platinumBarRecyclePrice),
-      platinumBarSellPrice: parseFloat(platinumBarSellPrice),
-      updateTime,
+    // 转换为 typeKey（支持中文名称或 typeKey）
+    let typeKey = getMetalTypeKey(metalType) || metalType;
+    
+    if (!METAL_TYPES.includes(typeKey)) {
+      return res.status(400).json({ error: '无效的金属类型' });
+    }
+
+    const minUpValue = parseFloat(minUp);
+    const minDownValue = parseFloat(minDown);
+
+    if (
+      Number.isNaN(minUpValue) ||
+      Number.isNaN(minDownValue) ||
+      minUpValue < -1 ||
+      minDownValue < -1
+    ) {
+      return res.status(400).json({ error: '配置值无效' });
+    }
+
+    const config = await saveConfig(typeKey, {
+      minUp: minUpValue,
+      minDown: minDownValue,
+      updateTime: updateTime || new Date().toISOString().replace('T', ' ').substring(0, 19),
     });
+
+    await triggerPriceUpdate([typeKey]);
 
     res.json(config);
   } catch (error) {
@@ -332,138 +379,266 @@ app.post('/api/config', express.json(), async (req, res) => {
   }
 });
 
-// 新增API端点：获取最新金价（从定时任务记录表获取）
-app.get('/api/latest-price', async (req, res) => {
+app.post('/api/config/batch', express.json(), async (req, res) => {
   try {
-    const latestPrice = await getLatestScheduledGoldPrice();
-    if (latestPrice) {
-      // Transform the data to match the priceList format
-      // Get the latest config to apply other metal prices
-      const config = await getLatestConfig();
-      const formattedPrice = [
-        {
-          type: '黄金',
-          recyclePrice: latestPrice.recyclePrice,
-          sellPrice: latestPrice.sellPrice,
-          updateTime: latestPrice.changeTime,
-          rawRecyclePrice: latestPrice.rawRecyclePrice,
-          rawSellPrice: latestPrice.rawSellPrice,
-        },
-        {
-          type: '白银',
-          recyclePrice: config.silverRecyclePrice,
-          sellPrice: config.silverSellPrice,
-          updateTime: latestPrice.changeTime,
-        },
-        {
-          type: '铂金',
-          recyclePrice: config.platinumRecyclePrice,
-          sellPrice: config.platinumSellPrice,
-          updateTime: latestPrice.changeTime,
-        },
-        {
-          type: '钯金',
-          recyclePrice: config.porpeziteRecyclePrice,
-          sellPrice: config.porpeziteSellPrice,
-          updateTime: latestPrice.changeTime,
-        },
-        {
-          type: '白银银条',
-          recyclePrice: config.silverBarRecyclePrice,
-          sellPrice: config.silverBarSellPrice,
-          updateTime: latestPrice.changeTime,
-        },
-        {
-          type: '铂金金条',
-          recyclePrice: config.platinumBarRecyclePrice,
-          sellPrice: config.platinumBarSellPrice,
-          updateTime: latestPrice.changeTime,
-        },
-      ];
+    const { configs, key } = req.body;
 
-      res.json({
-        priceList: formattedPrice,
-      });
-    } else {
-      res.json({
-        success: false,
-        message: '暂无记录',
-        priceList: [],
-      });
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效，无法修改配置' });
     }
+
+    if (!Array.isArray(configs) || configs.length === 0) {
+      return res.status(400).json({ error: '配置列表不能为空' });
+    }
+
+    const nowTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const normalizedConfigs = configs.map((item) => {
+      const typeKey = getMetalTypeKey(item.metalType) || item.metalType;
+      return {
+        metalType: typeKey,
+        minUp: parseFloat(item.minUp),
+        minDown: parseFloat(item.minDown),
+        updateTime: item.updateTime || nowTime,
+      };
+    });
+
+    for (const config of normalizedConfigs) {
+      if (!METAL_TYPES.includes(config.metalType)) {
+        return res.status(400).json({ error: '无效的金属类型' });
+      }
+      if (
+        Number.isNaN(config.minUp) ||
+        Number.isNaN(config.minDown) ||
+        config.minUp < -1 ||
+        config.minDown < -1
+      ) {
+        return res.status(400).json({ error: '配置值无效' });
+      }
+    }
+
+    const savedConfigs = await saveConfigsBatch(normalizedConfigs);
+    await triggerPriceUpdate(normalizedConfigs.map(item => item.metalType));
+    res.json({ success: true, configs: savedConfigs });
   } catch (error) {
-    console.error('获取最新金价记录时出错:', error);
-    res.status(500).json({ error: '获取最新金价记录失败' });
+    console.error('批量更新配置失败:', error);
+    res.status(500).json({ error: '批量更新配置失败', details: error?.message });
   }
 });
 
-// 新增API端点：获取实时金价（代理请求到数据源）
+app.post('/api/announcements/active', express.json(), async (req, res) => {
+  try {
+    const { clientTime } = req.body || {};
+    const targetDate = toDateString(clientTime);
+    const announcements = await getActiveAnnouncements(targetDate);
+    res.json({ success: true, announcements });
+  } catch (error) {
+    console.error('获取有效公告失败:', error);
+    res.status(500).json({ error: '获取公告失败' });
+  }
+});
+
+app.post('/api/announcements/list', express.json(), async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效' });
+    }
+    const announcements = await listAnnouncements();
+    res.json({ success: true, announcements });
+  } catch (error) {
+    console.error('获取公告列表失败:', error);
+    res.status(500).json({ error: '获取公告列表失败' });
+  }
+});
+
+app.post('/api/announcements/create', express.json(), async (req, res) => {
+  try {
+    const { key, title, summary, contentHtml, startDate, endDate } = req.body;
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效' });
+    }
+    if (!title || !summary || !contentHtml || !startDate || !endDate) {
+      return res.status(400).json({ error: '公告字段不完整' });
+    }
+    const nowTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const saved = await createAnnouncement({
+      title,
+      summary,
+      contentHtml,
+      startDate,
+      endDate,
+      createdAt: nowTime,
+      updatedAt: nowTime,
+    });
+    await trimAnnouncements(2000);
+    res.json({ success: true, announcement: saved });
+  } catch (error) {
+    console.error('新增公告失败:', error);
+    res.status(500).json({ error: '新增公告失败' });
+  }
+});
+
+app.post('/api/announcements/update', express.json(), async (req, res) => {
+  try {
+    const { key, id, title, summary, contentHtml, startDate, endDate } = req.body;
+    if (!isValidConfigKey(key)) {
+      return res.status(403).json({ error: '密钥无效' });
+    }
+    if (!id || !title || !summary || !contentHtml || !startDate || !endDate) {
+      return res.status(400).json({ error: '公告字段不完整' });
+    }
+    const nowTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const saved = await updateAnnouncement(id, {
+      title,
+      summary,
+      contentHtml,
+      startDate,
+      endDate,
+      updatedAt: nowTime,
+    });
+    res.json({ success: true, announcement: saved });
+  } catch (error) {
+    console.error('更新公告失败:', error);
+    res.status(500).json({ error: '更新公告失败' });
+  }
+});
+
+// API端点：获取最新价格
+app.get('/api/latest-price', async (req, res) => {
+  try {
+    const latestPrices = await getLatestAllPrices();
+    const allConfigs = await getLatestConfig();
+
+    const formattedPrice = METAL_TYPES.map(typeKey => {
+      const price = latestPrices[typeKey];
+      if (price) {
+        return {
+          type: typeKey,
+          name: getMetalName(typeKey),
+          recyclePrice: price.recyclePrice,
+          sellPrice: price.sellPrice,
+          updateTime: price.changeTime,
+          rawRecyclePrice: price.rawRecyclePrice,
+          rawSellPrice: price.rawSellPrice,
+        };
+      }
+      return null;
+    }).filter(Boolean);
+
+    if (formattedPrice.length > 0) {
+      res.json({ priceList: formattedPrice });
+    } else {
+      res.json({ success: false, message: '暂无记录', priceList: [] });
+    }
+  } catch (error) {
+    console.error('获取最新价格记录时出错:', error);
+    res.status(500).json({ error: '获取最新价格记录失败' });
+  }
+});
+
+// API端点：获取实时价格
 app.get('/api/realtime-price', async (req, res) => {
   try {
     const timeParam = req.query.time;
-    const rawGoldData = await getGoldRawData(timeParam);
-    if (rawGoldData) {
-      console.log(
-        '获取实时数据:',
-        rawGoldData.salePrice,
-        rawGoldData.buyPrice,
-        timeParam
-      );
-      res.json({
-        success: true,
-        originList: [rawGoldData],
-      });
+    const rawMetalData = await getAllMetalRawData(timeParam);
+    if (rawMetalData) {
+      const originList = Object.values(rawMetalData).filter(Boolean);
+      console.log('获取实时数据:', originList.map(d => `${d.name}:${d.salePrice}/${d.buyPrice}`).join(', '));
+      res.json({ success: true, originList });
     } else {
-      res.json({
-        success: false,
-        message: '获取实时金价失败',
-      });
+      res.json({ success: false, message: '获取实时金属价格失败' });
     }
   } catch (error) {
-    console.error('获取实时金价数据时出错:', error);
-    res.status(500).json({ error: '获取实时金价数据失败' });
+    console.error('获取实时金属价格数据时出错:', error);
+    res.status(500).json({ error: '获取实时金属价格数据失败' });
   }
 });
 
 // Handle other /api requests
 app.use('/api', (req, res, next) => {
-  // 获取 URL 中的 time 参数
   const timeParam = req.query.time;
   console.log('API request with time parameter:', timeParam);
 
-  // 只处理未被其他路由处理的 /api 请求
+  // 跳过已定义的 API 路径和 analytics 埋点接口
   if (
-    // req.path !== '/prices' &&
     req.path !== '/config' &&
     req.path !== '/price-history' &&
     req.path !== '/latest-price' &&
-    req.path !== '/realtime-price'
+    req.path !== '/realtime-price' &&
+    !req.path.startsWith('/analytics/') &&
+    !req.path.startsWith('/announcements')
   ) {
-    const method = req.method;
-    const queryParams = req.query;
-    const body = req.body;
-
     return res.json({
       message: 'API request received',
-      method,
-      queryParams,
-      body,
+      method: req.method,
+      queryParams: req.query,
+      body: req.body,
       time: timeParam,
     });
   }
   next();
 });
 
-// 新增API端点：获取金价变化历史记录
+// API 端点：获取价格变化历史记录
 app.get('/api/price-history', async (req, res) => {
   try {
+    let metalType = req.query.metalType || GOLD_TYPE_KEY;
     const limit = req.query.limit ? parseInt(req.query.limit) : 200;
-    // 修改为从定时任务写入的表中获取金价历史记录
-    const history = await getScheduledGoldPriceHistory(limit);
-    res.json({ history });
+
+    // 转换为 typeKey
+    let typeKey = getMetalTypeKey(metalType) || metalType;
+
+    if (!METAL_TYPES.includes(typeKey)) {
+      return res.status(400).json({ error: '无效的金属类型' });
+    }
+
+    const history = await getScheduledPriceHistory(typeKey, limit);
+    res.json({ 
+      metalType: typeKey, 
+      name: getMetalName(typeKey),
+      history 
+    });
   } catch (error) {
-    console.error('获取金价历史记录时出错:', error);
-    res.status(500).json({ error: '获取金价历史记录失败' });
+    console.error('获取价格历史记录时出错:', error);
+    res.status(500).json({ error: '获取价格历史记录失败' });
+  }
+});
+
+// API 端点：记录页面访问埋点
+app.post('/api/analytics/record', express.json(), async (req, res) => {
+  try {
+    const { pageName, visitorId } = req.body;
+    
+    if (!pageName || !visitorId) {
+      return res.status(400).json({ error: '缺少必要参数' });
+    }
+
+    const result = await recordPageVisit(pageName, visitorId);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('记录访问埋点时出错:', error);
+    res.status(500).json({ error: '记录访问埋点失败' });
+  }
+});
+
+// API 端点：获取页面访问统计
+app.get('/api/analytics/page-stats', async (req, res) => {
+  try {
+    const { pageName = 'home', days = 5 } = req.query;
+    
+    const dailyStats = await getPageAnalytics(pageName, parseInt(days));
+    const totalStats = await getTotalAnalytics(pageName);
+    
+    res.json({
+      success: true,
+      data: {
+        dailyStats,
+        totalStats
+      }
+    });
+  } catch (error) {
+    console.error('获取访问统计时出错:', error);
+    res.status(500).json({ error: '获取访问统计失败' });
   }
 });
 
@@ -471,18 +646,16 @@ app.get('/api/price-history', async (req, res) => {
 const frontendPath = path.join(__dirname, 'static');
 app.use('/assets', express.static(path.join(frontendPath, 'assets')));
 
-// Fallback to serve the frontend index.html for any other routes
 app.get('/', (req, res) => {
   res.sendFile(path.join(frontendPath, 'index.html'));
 });
 
-// 开启定时任务 拉取金价
+// 开启定时任务
 startScheduler();
 
-// 启动每日9点推送当前金价 定时任务
+// 启动每日9点定时任务
 scheduleDaily9AMCheck();
 
-// 优雅地处理进程退出
 process.on('SIGINT', () => {
   console.log('接收到 SIGINT，正在关闭服务器...');
   stopScheduler();
@@ -495,7 +668,6 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
