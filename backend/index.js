@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 import {
   METAL_TYPES,
@@ -817,9 +818,25 @@ app.get('/api/analytics/page-stats', async (req, res) => {
 
 // Serve static files from the frontend build
 const frontendPath = path.join(__dirname, 'static');
-app.use('/assets', express.static(path.join(frontendPath, 'assets')));
+// 读取前端 .env 配置中的 BASE_URL
+let baseUrl = '/';
+try {
+  const envConfig = dotenv.parse(fs.readFileSync(path.resolve(__dirname, '../frontend/.env')));
+  baseUrl = envConfig.VITE_BASE_URL || '/';
+} catch (e) {
+  console.log('未找到前端环境变量文件，使用默认路径 /');
+}
+
+// 移除末尾的斜杠，避免路径拼接问题
+const urlPrefix = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+
+app.use(`${urlPrefix}/assets`, express.static(path.join(frontendPath, 'assets')));
 
 app.get('/', (req, res) => {
+  // 重定向到 /metal-price/ 路径 
+  res.redirect(`${urlPrefix}`);
+});
+app.get(`${urlPrefix}`, (req, res) => {
   res.sendFile(path.join(frontendPath, 'index.html'));
 });
 
