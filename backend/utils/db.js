@@ -708,6 +708,28 @@ function updateAnnouncement(id, data) {
   });
 }
 
+// 清理超过60天的访问统计数据
+function cleanupPageAnalytics() {
+  return new Promise((resolve, reject) => {
+    try {
+      // 计算60天前的日期
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - 60);
+      const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+
+      const info = db.prepare(
+        `DELETE FROM page_analytics WHERE visitDate < ?`
+      ).run(cutoffDateStr);
+      
+      console.log(`已清理 ${info.changes} 条过期的访问统计记录（早于 ${cutoffDateStr}）`);
+      resolve({ removed: info.changes });
+    } catch (err) {
+      console.error('清理访问统计数据失败:', err);
+      reject(err);
+    }
+  });
+}
+
 export {
   db,
   METAL_TYPES,
@@ -726,6 +748,7 @@ export {
   recordPageVisit,
   getPageAnalytics,
   getTotalAnalytics,
+  cleanupPageAnalytics,
   listAnnouncements,
   getActiveAnnouncements,
   createAnnouncement,

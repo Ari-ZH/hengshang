@@ -20,6 +20,7 @@ import {
   recordPageVisit,
   getPageAnalytics,
   getTotalAnalytics,
+  cleanupPageAnalytics,
   listAnnouncements,
   getActiveAnnouncements,
   createAnnouncement,
@@ -347,6 +348,13 @@ function scheduleDaily9AMCheck() {
   setTimeout(async function dailyCheck() {
     try {
       console.log(`执行每日9点金价检查：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      
+      try {
+        await cleanupPageAnalytics();
+      } catch (cleanupError) {
+        console.error('执行每日清理任务失败:', cleanupError);
+      }
+
       const latestPrices = await getLatestAllPrices();
       const formattedPrice = METAL_TYPES.map((typeKey) => {
         const price = latestPrices[typeKey];
