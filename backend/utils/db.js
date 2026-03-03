@@ -1,4 +1,4 @@
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -8,16 +8,6 @@ const __dirname = path.dirname(__filename);
 
 // 数据库文件路径
 const dbPath = path.join(__dirname, '../config.db');
-
-// 创建数据库连接
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('数据库连接失败:', err.message);
-  } else {
-    console.log('已成功连接到 SQLite 数据库');
-    initDatabase();
-  }
-});
 
 // 金属类型映射（使用爬取接口的 type 字段作为 key，与接口返回的 type 字段对应）
 const METAL_TYPE_MAP = {
@@ -30,6 +20,17 @@ const METAL_TYPE_MAP = {
 
 // 支持的金属类型列表（type字段值的集合）
 const METAL_TYPES = Object.keys(METAL_TYPE_MAP);
+
+let db;
+try {
+  // 创建数据库连接
+  db = new Database(dbPath);
+  console.log('已成功连接到 SQLite 数据库');
+  db.pragma('journal_mode = WAL');
+  initDatabase();
+} catch (err) {
+  console.error('数据库连接失败:', err.message);
+}
 
 /**
  * 根据英文类型获取中文名称
@@ -61,69 +62,66 @@ function initDatabase() {
 
 // 创建新的数据库表结构
 function createNewTables() {
-  // 创建金属配置表（按金属类型区分）
-  db.run(`
-    CREATE TABLE IF NOT EXISTS metal_config (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      metalType TEXT NOT NULL UNIQUE,
-      minUp REAL NOT NULL DEFAULT 10,
-      minDown REAL NOT NULL DEFAULT 10,
-      fixedStep REAL NOT NULL DEFAULT 5,
-      updateTime TEXT NOT NULL,
-      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `, (err) => {
-    if (err) {
-      console.error('创建配置表失败:', err.message);
-    } else {
-      console.log('配置表已创建');
-      // 初始化默认金属配置
-      initDefaultMetalConfig();
-    }
-  });
+  try {
+    // 创建金属配置表（按金属类型区分）
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metal_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metalType TEXT NOT NULL UNIQUE,
+        minUp REAL NOT NULL DEFAULT 10,
+        minDown REAL NOT NULL DEFAULT 10,
+        fixedStep REAL NOT NULL DEFAULT 5,
+        updateTime TEXT NOT NULL,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('配置表已创建');
+    // 初始化默认金属配置
+    initDefaultMetalConfig();
+  } catch (err) {
+    console.error('创建配置表失败:', err.message);
+  }
 
   // 创建各金属历史记录表
   METAL_TYPES.forEach(typeKey => {
     const tableName = getTableName(typeKey);
     const metalName = getMetalName(typeKey);
-    db.run(`
-      CREATE TABLE IF NOT EXISTS ${tableName} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sellPrice REAL NOT NULL,
-        recyclePrice REAL NOT NULL,
-        rawSellPrice REAL NOT NULL,
-        rawRecyclePrice REAL NOT NULL,
-        prevSellPrice REAL,
-        prevRecyclePrice REAL,
-        changeTime TEXT NOT NULL,
-        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
-      if (err) {
-        console.error(`创建${metalName}历史表失败:`, err.message);
-      } else {
-        console.log(`${metalName}历史表已创建`);
-      }
-    });
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${tableName} (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sellPrice REAL NOT NULL,
+          recyclePrice REAL NOT NULL,
+          rawSellPrice REAL NOT NULL,
+          rawRecyclePrice REAL NOT NULL,
+          prevSellPrice REAL,
+          prevRecyclePrice REAL,
+          changeTime TEXT NOT NULL,
+          createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log(`${metalName}历史表已创建`);
+    } catch (err) {
+      console.error(`创建${metalName}历史表失败:`, err.message);
+    }
   });
 
   // 创建访问统计埋点表
-  db.run(`
-    CREATE TABLE IF NOT EXISTS page_analytics (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      pageName TEXT NOT NULL,
-      visitorId TEXT NOT NULL,
-      visitTime TEXT NOT NULL,
-      visitDate TEXT NOT NULL,
-      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `, (err) => {
-    if (err) {
-      console.error('创建访问统计表失败:', err.message);
-    } else {
-      console.log('访问统计表 page_analytics 已创建');
-    }
-  });
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS page_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageName TEXT NOT NULL,
+        visitorId TEXT NOT NULL,
+        visitTime TEXT NOT NULL,
+        visitDate TEXT NOT NULL,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('访问统计表 page_analytics 已创建');
+  } catch (err) {
+    console.error('创建访问统计表失败:', err.message);
+  }
 
   initCustomMetalTable();
   initAnnouncementTable();
@@ -131,9 +129,11 @@ function createNewTables() {
 
 // 检查并迁移旧表数据
 function checkAndMigrateLegacyData() {
-  // 获取 metal_config 表的建表语句
-  db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='metal_config'", (err, row) => {
-    if (err || !row) {
+  try {
+    // 获取 metal_config 表的建表语句
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='metal_config'").get();
+    
+    if (!row) {
       createNewTables();
       return;
     }
@@ -143,13 +143,12 @@ function checkAndMigrateLegacyData() {
     if (oldSchema.includes('metalType')) {
       console.log('已是新表结构，无需迁移');
       if (!oldSchema.includes('fixedStep')) {
-        db.run('ALTER TABLE metal_config ADD COLUMN fixedStep REAL NOT NULL DEFAULT 5', (alterErr) => {
-          if (alterErr) {
-            console.error('新增配置字段失败:', alterErr.message);
-          } else {
-            db.run('UPDATE metal_config SET fixedStep = 5 WHERE fixedStep IS NULL');
-          }
-        });
+        try {
+          db.exec('ALTER TABLE metal_config ADD COLUMN fixedStep REAL NOT NULL DEFAULT 5');
+          db.exec('UPDATE metal_config SET fixedStep = 5 WHERE fixedStep IS NULL');
+        } catch (alterErr) {
+          console.error('新增配置字段失败:', alterErr.message);
+        }
       }
       // 初始化新增的金属历史表
       initNewMetalTables();
@@ -161,81 +160,83 @@ function checkAndMigrateLegacyData() {
     console.log('检测到旧表结构，开始迁移数据...');
     // 执行旧数据迁移
     migrateFromLegacy();
-  });
+  } catch (err) {
+    console.error('检查表结构失败:', err.message);
+    createNewTables();
+  }
 }
 
 // 从旧表结构迁移数据到新表结构
 function migrateFromLegacy() {
-  db.serialize(() => {
-    db.get('SELECT * FROM metal_config ORDER BY id DESC LIMIT 1', (err, row) => {
-      const legacyConfig = err ? null : row;
-      const legacyTableName = `metal_config_legacy_${Date.now()}`;
-      db.run(`ALTER TABLE metal_config RENAME TO ${legacyTableName}`, (renameErr) => {
-        if (renameErr) {
-          console.error('迁移配置表失败:', renameErr.message);
-          createNewTables();
-          return;
-        }
-        db.run(`
-          CREATE TABLE IF NOT EXISTS metal_config (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            metalType TEXT NOT NULL UNIQUE,
-            minUp REAL NOT NULL DEFAULT 10,
-            minDown REAL NOT NULL DEFAULT 10,
-            fixedStep REAL NOT NULL DEFAULT 5,
-            updateTime TEXT NOT NULL,
-            createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `, (createErr) => {
-          if (createErr) {
-            console.error('创建配置表失败:', createErr.message);
-            return;
-          }
-          const updateTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
-          if (legacyConfig) {
-            const minUp = Number.isFinite(legacyConfig.minUp) ? legacyConfig.minUp : 10;
-            const minDown = Number.isFinite(legacyConfig.minDown) ? legacyConfig.minDown : 10;
-            const legacyUpdateTime = legacyConfig.updateTime || updateTime;
-            db.run(
-              `INSERT OR REPLACE INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`,
-              ['1_au_1', minUp, minDown, 5, legacyUpdateTime],
-              () => {
-                initDefaultMetalConfig();
-                initNewMetalTables();
-                db.run(`
-                  CREATE TABLE IF NOT EXISTS page_analytics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pageName TEXT NOT NULL,
-                    visitorId TEXT NOT NULL,
-                    visitTime TEXT NOT NULL,
-                    visitDate TEXT NOT NULL,
-                    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                  )
-                `);
-                initCustomMetalTable();
-                initAnnouncementTable();
-              }
-            );
-            return;
-          }
-          initDefaultMetalConfig();
-          initNewMetalTables();
-          db.run(`
-            CREATE TABLE IF NOT EXISTS page_analytics (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              pageName TEXT NOT NULL,
-              visitorId TEXT NOT NULL,
-              visitTime TEXT NOT NULL,
-              visitDate TEXT NOT NULL,
-              createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-          `);
-          initCustomMetalTable();
-          initAnnouncementTable();
-        });
-      });
-    });
+  // Use transaction for migration
+  const migrateTransaction = db.transaction(() => {
+    const row = db.prepare('SELECT * FROM metal_config ORDER BY id DESC LIMIT 1').get();
+    const legacyConfig = row || null;
+    const legacyTableName = `metal_config_legacy_${Date.now()}`;
+    
+    db.prepare(`ALTER TABLE metal_config RENAME TO ${legacyTableName}`).run();
+    
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS metal_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metalType TEXT NOT NULL UNIQUE,
+        minUp REAL NOT NULL DEFAULT 10,
+        minDown REAL NOT NULL DEFAULT 10,
+        fixedStep REAL NOT NULL DEFAULT 5,
+        updateTime TEXT NOT NULL,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+
+    const updateTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    if (legacyConfig) {
+      const minUp = Number.isFinite(legacyConfig.minUp) ? legacyConfig.minUp : 10;
+      const minDown = Number.isFinite(legacyConfig.minDown) ? legacyConfig.minDown : 10;
+      const legacyUpdateTime = legacyConfig.updateTime || updateTime;
+      
+      db.prepare(`INSERT OR REPLACE INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`).run(
+        '1_au_1', minUp, minDown, 5, legacyUpdateTime
+      );
+      
+      initDefaultMetalConfig();
+      initNewMetalTables();
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS page_analytics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pageName TEXT NOT NULL,
+          visitorId TEXT NOT NULL,
+          visitTime TEXT NOT NULL,
+          visitDate TEXT NOT NULL,
+          createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+      initCustomMetalTable();
+      initAnnouncementTable();
+      return;
+    }
+    
+    initDefaultMetalConfig();
+    initNewMetalTables();
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS page_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageName TEXT NOT NULL,
+        visitorId TEXT NOT NULL,
+        visitTime TEXT NOT NULL,
+        visitDate TEXT NOT NULL,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+    initCustomMetalTable();
+    initAnnouncementTable();
   });
+
+  try {
+    migrateTransaction();
+  } catch (err) {
+    console.error('迁移配置表失败:', err.message);
+    createNewTables();
+  }
 }
 
 // 初始化新增的金属历史表（用于兼容已存在主表的情况）
@@ -243,9 +244,10 @@ function initNewMetalTables() {
   METAL_TYPES.forEach(typeKey => {
     const tableName = getTableName(typeKey);
     // 检查表是否已存在
-    db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='${tableName}'`, (err, row) => {
-      if (!row) {
-        db.run(`
+    const row = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${tableName}'`).get();
+    if (!row) {
+      try {
+        db.exec(`
           CREATE TABLE IF NOT EXISTS ${tableName} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sellPrice REAL NOT NULL,
@@ -257,52 +259,49 @@ function initNewMetalTables() {
             changeTime TEXT NOT NULL,
             createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           )
-        `, (err) => {
-          if (err) {
-            console.error(`创建${getMetalName(typeKey)}历史表失败:`, err.message);
-          } else {
-            console.log(`${getMetalName(typeKey)}历史表已创建`);
-          }
-        });
+        `);
+        console.log(`${getMetalName(typeKey)}历史表已创建`);
+      } catch (err) {
+        console.error(`创建${getMetalName(typeKey)}历史表失败:`, err.message);
       }
-    });
+    }
   });
 }
 
 function initAnnouncementTable() {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS announcements (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      summary TEXT NOT NULL,
-      contentHtml TEXT NOT NULL,
-      startDate TEXT NOT NULL,
-      endDate TEXT NOT NULL,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
-    )
-  `, (err) => {
-    if (err) {
-      console.error('创建公告表失败:', err.message);
-    }
-  });
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        contentHtml TEXT NOT NULL,
+        startDate TEXT NOT NULL,
+        endDate TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      )
+    `);
+  } catch (err) {
+    console.error('创建公告表失败:', err.message);
+  }
 }
 
 function initCustomMetalTable() {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS custom_metal (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      sellPrice REAL NOT NULL,
-      recyclePrice REAL NOT NULL,
-      updatedAt TEXT NOT NULL,
-      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `, (err) => {
-    if (err) {
-      console.error('创建自定义金属表失败:', err.message);
-    }
-  });
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS custom_metal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        sellPrice REAL NOT NULL,
+        recyclePrice REAL NOT NULL,
+        updatedAt TEXT NOT NULL,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  } catch (err) {
+    console.error('创建自定义金属表失败:', err.message);
+  }
 }
 
 // 根据金属类型key获取对应的历史表名
@@ -323,88 +322,77 @@ function initDefaultMetalConfig() {
   const defaultMinUp = { '1_au_1': 10, '1_ag_44': 1, '1_pt_9': 1, '1_pd_8': 1, '1_au_22': 5 };
   const defaultMinDown = { '1_au_1': 10, '1_ag_44': 1, '1_pt_9': 1, '1_pd_8': 1, '1_au_22': 5 };
 
-  METAL_TYPES.forEach(typeKey => {
-    db.get('SELECT id FROM metal_config WHERE metalType = ?', [typeKey], (err, row) => {
-      if (err) {
-        console.error(`查询${getMetalName(typeKey)}配置失败:`, err.message);
-        return;
-      }
+  const insertTransaction = db.transaction(() => {
+    METAL_TYPES.forEach(typeKey => {
+      const row = db.prepare('SELECT id FROM metal_config WHERE metalType = ?').get(typeKey);
       if (!row) {
         const updateTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        db.run(
-          `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`,
-          [typeKey, defaultMinUp[typeKey], defaultMinDown[typeKey], 5, updateTime],
-          function (err) {
-            if (err) {
-              console.error(`插入${getMetalName(typeKey)}默认配置失败:`, err.message);
-            } else {
-              console.log(`已插入${getMetalName(typeKey)}默认配置`);
-            }
-          }
-        );
+        try {
+          db.prepare(`INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`).run(
+            typeKey, defaultMinUp[typeKey], defaultMinDown[typeKey], 5, updateTime
+          );
+          console.log(`已插入${getMetalName(typeKey)}默认配置`);
+        } catch (err) {
+          console.error(`插入${getMetalName(typeKey)}默认配置失败:`, err.message);
+        }
       }
     });
   });
+  
+  insertTransaction();
 }
 
 // 获取最新配置
 function getLatestConfig() {
   return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM metal_config', (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        const config = {};
-        // 设置默认配置
-        METAL_TYPES.forEach(typeKey => {
-          config[typeKey] = { minUp: 10, minDown: 10, fixedStep: 5 };
-        });
-        // 填充实际配置
-        (rows || []).forEach(row => {
-          config[row.metalType] = {
-            minUp: row.minUp,
-            minDown: row.minDown,
-            fixedStep: row.fixedStep ?? 5,
-            name: getMetalName(row.metalType)
-          };
-        });
-        resolve(config);
-      }
-    });
+    try {
+      const rows = db.prepare('SELECT * FROM metal_config').all();
+      const config = {};
+      // 设置默认配置
+      METAL_TYPES.forEach(typeKey => {
+        config[typeKey] = { minUp: 10, minDown: 10, fixedStep: 5 };
+      });
+      // 填充实际配置
+      (rows || []).forEach(row => {
+        config[row.metalType] = {
+          minUp: row.minUp,
+          minDown: row.minDown,
+          fixedStep: row.fixedStep ?? 5,
+          name: getMetalName(row.metalType)
+        };
+      });
+      resolve(config);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 根据金属类型获取配置
 function getConfigByMetalType(typeKey) {
   return new Promise((resolve, reject) => {
-    db.get('SELECT * FROM metal_config WHERE metalType = ?', [typeKey], (err, row) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row || { metalType: typeKey, minUp: 10, minDown: 10, fixedStep: 5 });
-      }
-    });
+    try {
+      const row = db.prepare('SELECT * FROM metal_config WHERE metalType = ?').get(typeKey);
+      resolve(row || { metalType: typeKey, minUp: 10, minDown: 10, fixedStep: 5 });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 保存配置（使用 ON CONFLICT 实现插入或更新）
 function saveConfig(typeKey, config) {
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`,
-      [
+    try {
+      db.prepare(`INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`).run(
         typeKey, config.minUp, config.minDown, config.fixedStep, config.updateTime,
         config.minUp, config.minDown, config.fixedStep, config.updateTime
-      ],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ metalType: typeKey, ...config });
-        }
-      }
-    );
+      );
+      resolve({ metalType: typeKey, ...config });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
@@ -414,141 +402,91 @@ function saveConfigsBatch(configs) {
       resolve([]);
       return;
     }
-    db.serialize(() => {
-      db.run('BEGIN IMMEDIATE TRANSACTION', (beginErr) => {
-        if (beginErr) {
-          reject(beginErr);
-          return;
+    try {
+      const insert = db.prepare(`INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`);
+      
+      const transaction = db.transaction((configs) => {
+        for (const config of configs) {
+          insert.run(
+            config.metalType, config.minUp, config.minDown, config.fixedStep, config.updateTime,
+            config.minUp, config.minDown, config.fixedStep, config.updateTime
+          );
         }
-        const sql = `INSERT INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(metalType) DO UPDATE SET minUp = ?, minDown = ?, fixedStep = ?, updateTime = ?`;
-        const stmt = db.prepare(sql, (prepareErr) => {
-          if (prepareErr) {
-            db.run('ROLLBACK', () => {
-              reject(prepareErr);
-            });
-            return;
-          }
-          let pending = configs.length;
-          let hasError = false;
-          configs.forEach((config) => {
-            stmt.run(
-              [
-                config.metalType,
-                config.minUp,
-                config.minDown,
-                config.fixedStep,
-                config.updateTime,
-                config.minUp,
-                config.minDown,
-                config.fixedStep,
-                config.updateTime,
-              ],
-              function (err) {
-                if (hasError) return;
-                if (err) {
-                  hasError = true;
-                  stmt.finalize(() => {
-                    db.run('ROLLBACK', () => {
-                      reject(err);
-                    });
-                  });
-                  return;
-                }
-                pending -= 1;
-                if (pending === 0) {
-                  stmt.finalize((finalErr) => {
-                    if (finalErr) {
-                      db.run('ROLLBACK', () => {
-                        reject(finalErr);
-                      });
-                      return;
-                    }
-                    db.run('COMMIT', (commitErr) => {
-                      if (commitErr) {
-                        db.run('ROLLBACK', () => {
-                          reject(commitErr);
-                        });
-                      } else {
-                        resolve(configs.map(item => ({ metalType: item.metalType, ...item })));
-                      }
-                    });
-                  });
-                }
-              }
-            );
-          });
-        });
       });
-    });
+      
+      transaction(configs);
+      resolve(configs.map(item => ({ metalType: item.metalType, ...item })));
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 获取指定金属的最新价格记录
 function getLatestScheduledPrice(typeKey) {
   return new Promise((resolve, reject) => {
-    const tableName = getTableName(typeKey);
-    db.get(`SELECT * FROM ${tableName} ORDER BY id DESC LIMIT 1`, (err, row) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row || null);
-      }
-    });
+    try {
+      const tableName = getTableName(typeKey);
+      const row = db.prepare(`SELECT * FROM ${tableName} ORDER BY id DESC LIMIT 1`).get();
+      resolve(row || null);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 保存指定金属的价格记录
 function saveScheduledPrice(typeKey, priceData) {
   return new Promise((resolve, reject) => {
-    const tableName = getTableName(typeKey);
-    db.run(
-      `INSERT INTO ${tableName} (sellPrice, recyclePrice, rawSellPrice, rawRecyclePrice, prevSellPrice, prevRecyclePrice, changeTime) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
+    try {
+      const tableName = getTableName(typeKey);
+      const stmt = db.prepare(
+        `INSERT INTO ${tableName} (sellPrice, recyclePrice, rawSellPrice, rawRecyclePrice, prevSellPrice, prevRecyclePrice, changeTime) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      );
+      const info = stmt.run(
         priceData.sellPrice,
         priceData.recyclePrice,
         priceData.rawSellPrice,
         priceData.rawRecyclePrice,
         priceData.prevSellPrice,
         priceData.prevRecyclePrice,
-        priceData.changeTime,
-      ],
-      function (err) {
-        if (err) {
-          console.error(`插入${getMetalName(typeKey)}数据失败:`, err);
-          return reject(err);
-        }
-        resolve({ id: this.lastID, metalType: typeKey, ...priceData });
-        // 清理超过5000条的旧数据
-        cleanupOldData(tableName);
-      }
-    );
+        priceData.changeTime
+      );
+      
+      resolve({ id: info.lastInsertRowid, metalType: typeKey, ...priceData });
+      // 清理超过5000条的旧数据
+      cleanupOldData(tableName);
+    } catch (err) {
+      console.error(`插入${getMetalName(typeKey)}数据失败:`, err);
+      reject(err);
+    }
   });
 }
 
 // 清理超过限制的旧数据（保留最近3000条）
 function cleanupOldData(tableName) {
-  db.get(`SELECT COUNT(*) as count FROM ${tableName}`, [], (err, row) => {
-    if (err || !row) return;
+  try {
+    const row = db.prepare(`SELECT COUNT(*) as count FROM ${tableName}`).get();
+    if (!row) return;
     if (row.count > 5000) {
-      db.run(`DELETE FROM ${tableName} WHERE id NOT IN (SELECT id FROM ${tableName} ORDER BY id DESC LIMIT 3000)`, (err) => {
-        if (err) console.error(`清理${tableName}旧数据失败:`, err);
-      });
+      db.prepare(`DELETE FROM ${tableName} WHERE id NOT IN (SELECT id FROM ${tableName} ORDER BY id DESC LIMIT 3000)`).run();
     }
-  });
+  } catch (err) {
+    console.error(`清理${tableName}旧数据失败:`, err);
+  }
 }
 
 // 获取指定金属的价格历史记录
 function getScheduledPriceHistory(typeKey, limit = 200) {
   return new Promise((resolve, reject) => {
-    const tableName = getTableName(typeKey);
-    db.all(`SELECT * FROM ${tableName} ORDER BY id DESC LIMIT ?`, [limit], (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows || []);
-      }
-    });
+    try {
+      const tableName = getTableName(typeKey);
+      const rows = db.prepare(`SELECT * FROM ${tableName} ORDER BY id DESC LIMIT ?`).all(limit);
+      resolve(rows || []);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
@@ -569,234 +507,204 @@ function getLatestAllPrices() {
 
 function listCustomMetals() {
   return new Promise((resolve, reject) => {
-    db.all(`SELECT * FROM custom_metal ORDER BY id DESC`, (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows || []);
-      }
-    });
+    try {
+      const rows = db.prepare(`SELECT * FROM custom_metal ORDER BY id DESC`).all();
+      resolve(rows || []);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function createCustomMetal(data) {
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO custom_metal (name, sellPrice, recyclePrice, updatedAt) VALUES (?, ?, ?, ?)`,
-      [data.name, data.sellPrice, data.recyclePrice, data.updatedAt],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, ...data });
-        }
-      }
-    );
+    try {
+      const info = db.prepare(
+        `INSERT INTO custom_metal (name, sellPrice, recyclePrice, updatedAt) VALUES (?, ?, ?, ?)`
+      ).run(data.name, data.sellPrice, data.recyclePrice, data.updatedAt);
+      resolve({ id: info.lastInsertRowid, ...data });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function updateCustomMetal(id, data) {
   return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE custom_metal SET name = ?, sellPrice = ?, recyclePrice = ?, updatedAt = ? WHERE id = ?`,
-      [data.name, data.sellPrice, data.recyclePrice, data.updatedAt, id],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id, ...data });
-        }
-      }
-    );
+    try {
+      db.prepare(
+        `UPDATE custom_metal SET name = ?, sellPrice = ?, recyclePrice = ?, updatedAt = ? WHERE id = ?`
+      ).run(data.name, data.sellPrice, data.recyclePrice, data.updatedAt, id);
+      resolve({ id, ...data });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function deleteCustomMetal(id) {
   return new Promise((resolve, reject) => {
-    db.run(`DELETE FROM custom_metal WHERE id = ?`, [id], function (err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve({ id, removed: this.changes });
-      }
-    });
+    try {
+      const info = db.prepare(`DELETE FROM custom_metal WHERE id = ?`).run(id);
+      resolve({ id, removed: info.changes });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 记录页面访问埋点
 function recordPageVisit(pageName, visitorId) {
   return new Promise((resolve, reject) => {
-    const now = new Date();
-    const visitTime = now.toISOString().replace('T', ' ').substring(0, 19);
-    const visitDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
-    
-    db.run(
-      `INSERT INTO page_analytics (pageName, visitorId, visitTime, visitDate) VALUES (?, ?, ?, ?)`,
-      [pageName, visitorId, visitTime, visitDate],
-      function(err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, pageName, visitorId, visitTime });
-        }
-      }
-    );
+    try {
+      const now = new Date();
+      const visitTime = now.toISOString().replace('T', ' ').substring(0, 19);
+      const visitDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
+      
+      const info = db.prepare(
+        `INSERT INTO page_analytics (pageName, visitorId, visitTime, visitDate) VALUES (?, ?, ?, ?)`
+      ).run(pageName, visitorId, visitTime, visitDate);
+      
+      resolve({ id: info.lastInsertRowid, pageName, visitorId, visitTime });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 获取指定页面的访问统计（近 N 日）
 function getPageAnalytics(pageName, days = 5) {
   return new Promise((resolve, reject) => {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - days);
-    const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
-    
-    // 获取每日的 PV 和 UV
-    db.all(`
-      SELECT 
-        visitDate,
-        COUNT(*) as pv,
-        COUNT(DISTINCT visitorId) as uv
-      FROM page_analytics
-      WHERE pageName = ? AND visitDate >= ?
-      GROUP BY visitDate
-      ORDER BY visitDate DESC
-    `, [pageName, cutoffDateStr], (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows || []);
-      }
-    });
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - days);
+      const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+      
+      // 获取每日的 PV 和 UV
+      const rows = db.prepare(`
+        SELECT 
+          visitDate,
+          COUNT(*) as pv,
+          COUNT(DISTINCT visitorId) as uv
+        FROM page_analytics
+        WHERE pageName = ? AND visitDate >= ?
+        GROUP BY visitDate
+        ORDER BY visitDate DESC
+      `).all(pageName, cutoffDateStr);
+      
+      resolve(rows || []);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 // 获取累计访问统计
 function getTotalAnalytics(pageName) {
   return new Promise((resolve, reject) => {
-    db.all(`
-      SELECT 
-        COUNT(*) as totalPv,
-        COUNT(DISTINCT visitorId) as totalUv
-      FROM page_analytics
-      WHERE pageName = ?
-    `, [pageName], (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows[0] || { totalPv: 0, totalUv: 0 });
-      }
-    });
+    try {
+      const rows = db.prepare(`
+        SELECT 
+          COUNT(*) as totalPv,
+          COUNT(DISTINCT visitorId) as totalUv
+        FROM page_analytics
+        WHERE pageName = ?
+      `).all(pageName);
+      resolve(rows[0] || { totalPv: 0, totalUv: 0 });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function listAnnouncements() {
   return new Promise((resolve, reject) => {
-    db.all(
-      `SELECT * FROM announcements ORDER BY createdAt DESC, id DESC`,
-      (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows || []);
-        }
-      }
-    );
+    try {
+      const rows = db.prepare(
+        `SELECT * FROM announcements ORDER BY createdAt DESC, id DESC`
+      ).all();
+      resolve(rows || []);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function getActiveAnnouncements(targetDate) {
   return new Promise((resolve, reject) => {
-    db.all(
-      `SELECT * FROM announcements WHERE startDate <= ? AND endDate >= ? ORDER BY startDate DESC, createdAt DESC`,
-      [targetDate, targetDate],
-      (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows || []);
-        }
-      }
-    );
+    try {
+      const rows = db.prepare(
+        `SELECT * FROM announcements WHERE startDate <= ? AND endDate >= ? ORDER BY startDate DESC, createdAt DESC`
+      ).all(targetDate, targetDate);
+      resolve(rows || []);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function trimAnnouncements(maxCount) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT COUNT(*) as total FROM announcements`, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
+    try {
+      const row = db.prepare(`SELECT COUNT(*) as total FROM announcements`).get();
       const total = row?.total || 0;
       const overflow = total - maxCount;
       if (overflow <= 0) {
         resolve({ removed: 0 });
         return;
       }
-      db.run(
-        `DELETE FROM announcements WHERE id IN (SELECT id FROM announcements ORDER BY createdAt ASC, id ASC LIMIT ?)`,
-        [overflow],
-        (deleteErr) => {
-          if (deleteErr) {
-            reject(deleteErr);
-          } else {
-            resolve({ removed: overflow });
-          }
-        }
-      );
-    });
+      const info = db.prepare(
+        `DELETE FROM announcements WHERE id IN (SELECT id FROM announcements ORDER BY createdAt ASC, id ASC LIMIT ?)`
+      ).run(overflow);
+      resolve({ removed: overflow });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function createAnnouncement(data) {
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO announcements (title, summary, contentHtml, startDate, endDate, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
+    try {
+      const info = db.prepare(
+        `INSERT INTO announcements (title, summary, contentHtml, startDate, endDate, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
         data.title,
         data.summary,
         data.contentHtml,
         data.startDate,
         data.endDate,
         data.createdAt,
-        data.updatedAt,
-      ],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, ...data });
-        }
-      }
-    );
+        data.updatedAt
+      );
+      resolve({ id: info.lastInsertRowid, ...data });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function updateAnnouncement(id, data) {
   return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE announcements
-       SET title = ?, summary = ?, contentHtml = ?, startDate = ?, endDate = ?, updatedAt = ?
-       WHERE id = ?`,
-      [
+    try {
+      db.prepare(
+        `UPDATE announcements
+         SET title = ?, summary = ?, contentHtml = ?, startDate = ?, endDate = ?, updatedAt = ?
+         WHERE id = ?`
+      ).run(
         data.title,
         data.summary,
         data.contentHtml,
         data.startDate,
         data.endDate,
         data.updatedAt,
-        id,
-      ],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id, ...data });
-        }
-      }
-    );
+        id
+      );
+      resolve({ id, ...data });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

@@ -5,6 +5,8 @@ project
 *.zip
 package-lock.json
 config.db
+config.db-shm
+config.db-wal
 backend/static
 logs/
 .env
