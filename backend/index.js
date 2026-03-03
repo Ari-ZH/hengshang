@@ -831,12 +831,13 @@ try {
 const urlPrefix = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
 
 app.use(`${urlPrefix}/assets`, express.static(path.join(frontendPath, 'assets')));
-
 app.get('/', (req, res) => {
   // 重定向到 /metal-price/ 路径 
   res.redirect(`${urlPrefix}`);
 });
-app.get(`${urlPrefix}`, (req, res) => {
+// 所有前缀开头的请求都打到html入口上
+const prefixRegex = new RegExp(`^${urlPrefix.replace(/\//g, '\\/')}.*`);
+app.get(prefixRegex, (req, res) => {
   res.sendFile(path.join(frontendPath, 'index.html'));
 });
 
