@@ -8,9 +8,9 @@
     "build:frontend": "cd frontend && npm run build",
     "start:dev": "cd backend && npm run dev",
     "start:pre": "pm2 start ecosystem.config.js --only fetcher_pre",
-    "start:prod": "pm2 start ecosystem.config.js --only fetcher",
-    "stop": "pm2 stop fetcher fetcher_pre",
-    "restart": "pm2 restart fetcher fetcher_pre",
+    "start:prod": "pm2 start ecosystem.config.js --only fetcher_prod",
+    "stop": "pm2 stop fetcher_prod fetcher_pre",
+    "restart": "pm2 restart fetcher_prod fetcher_pre",
     "logs": "pm2 logs"
   },
   "author": "",
