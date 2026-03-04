@@ -1,7 +1,5 @@
 const baseConfig = {
   script: './backend/index.js',
-  output: 'logs/output.log',
-  error: 'logs/error.log',
   time: true, // 添加这一行来启用日志时间戳
 };
 
@@ -10,6 +8,8 @@ module.exports = {
     {
       ...baseConfig,
       name: 'fetcher', // 生产环境服务名
+      output: 'logs/output.log',
+      error: 'logs/error.log',
       // production 环境配置：正式线上环境
       // pm2 start ecosystem.config.js --only fetcher --env production
       env: {
@@ -21,6 +21,8 @@ module.exports = {
     {
       ...baseConfig,
       name: 'fetcher_pre', // 预发环境服务名
+      output: 'logs/pre-output.log',
+      error: 'logs/pre-error.log',
       // pre 环境配置：预发环境，用于上线前测试
       // pm2 start ecosystem.config.js --only fetcher_pre --env pre
       env: {
