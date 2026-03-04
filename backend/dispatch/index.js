@@ -71,11 +71,11 @@ export function dispatchNotify(params) {
   
   const titlePrefix = isPre() ? '[pre]' : '';
   
-  // 优化标题：黄金售卖 580.5 (↑2.5)
+  // 优化标题：黄金售卖 580.5 (涨3)
   const diff = Number(currentValue) - Number(beforeValue);
-  // 保留最多2位小数，去掉末尾的0
-  const diffAbs = Math.abs(diff).toFixed(2).replace(/\.?0+$/, '');
-  const sign = diff > 0 ? '↑' : diff < 0 ? '↓' : '';
+  // 只保留整数
+  const diffAbs = Math.abs(diff).toFixed(0);
+  const sign = diff > 0 ? '涨' : diff < 0 ? '跌' : '';
   const diffText = diff !== 0 ? `(${sign}${diffAbs})` : '';
   
   const payload = {
