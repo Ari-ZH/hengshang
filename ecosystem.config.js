@@ -7,7 +7,7 @@ module.exports = {
   apps: [
     {
       ...baseConfig,
-      name: 'fetcher', // 生产环境服务名
+      name: 'fetcher_prod', // 生产环境服务名
       output: 'logs/output.log',
       error: 'logs/error.log',
       // production 环境配置：正式线上环境
