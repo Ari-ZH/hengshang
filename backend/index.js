@@ -838,6 +838,26 @@ app.get('/api/analytics/page-stats', async (req, res) => {
   }
 });
 
+// 处理根路径下的 .txt 文件请求
+// 例如: http://domain.com/bb7ded191e617bffa3aa5a21aece6389.txt
+// 映射到 backend/txt_files/ 目录
+app.get('/:filename.txt', (req, res, next) => {
+  const { filename } = req.params;
+  // 安全检查：防止目录遍历攻击
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    return res.status(403).send('Forbidden');
+  }
+
+  const txtFilePath = path.join(__dirname, 'txt_files', `${filename}.txt`);
+  
+  if (fs.existsSync(txtFilePath)) {
+    res.sendFile(txtFilePath);
+  } else {
+    // 如果文件不存在，交给后续的中间件处理（例如前端路由）
+    next();
+  }
+});
+
 // Serve static files from the frontend build
 const frontendPath = path.join(__dirname, 'static');
 // 读取前端 .env 配置中的 BASE_URL
