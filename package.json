@@ -4,10 +4,14 @@
   "description": "A simple fetcher package",
   "main": "index.js",
   "scripts": {
-    "build": "npm run install-f && npm run install-b && npm run build-f",
-    "install-f": "cd frontend && npm install",
-    "install-b": "cd backend && npm install",
-    "build-f": "cd frontend && npm run build"
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && npm install",
+    "build:frontend": "cd frontend && npm run build",
+    "start:dev": "cd backend && npm run dev",
+    "start:pre": "pm2 start ecosystem.config.js --only fetcher_pre",
+    "start:prod": "pm2 start ecosystem.config.js --only fetcher",
+    "stop": "pm2 stop fetcher fetcher_pre",
+    "restart": "pm2 restart fetcher fetcher_pre",
+    "logs": "pm2 logs"
   },
   "author": "",
   "license": "ISC"

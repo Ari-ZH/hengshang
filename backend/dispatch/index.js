@@ -1,4 +1,6 @@
 import dayjs from 'dayjs';
+import { isPre } from '../utils/env.js';
+
 export function dispatchNotify(params) {
   // Only send notifications between 9 AM and 9 PM
   const {
@@ -31,6 +33,13 @@ export function dispatchNotify(params) {
       message: 'Outside notification hours (9AM-9PM)',
     });
   }
+  
+  // 构建完整的 URL
+  // 如果 base 是 '/'，则 url 为 http://hengshang.asia/
+  // 如果 base 是 '/metal/', 则 url 为 http://hengshang.asia/metal/
+  const base = process.env.VITE_BASE_URL || '/';
+  const linkUrl = `http://hengshang.asia${base}`;
+
   const content = `
       <div style="font-family: Arial, sans-serif; padding: 10px; color: #333333; background-color: #ffffff;">
         <h2 style="color: #1a73e8; margin-bottom: 12px;">${typeText}价格变动通知</h2>
@@ -55,13 +64,23 @@ export function dispatchNotify(params) {
         </p>
         <p style="font-size: 14px; margin-top: 5px; color: #555555;">
           <a href="http://ypjgold.cn/show" style="color: #1a73e8; text-decoration: underline; display: block; margin-bottom: 8px;">金价实时查询</a>
-          <a href="http://47.115.210.76/" style="color: #1a73e8; text-decoration: underline; display: block;">当前报价</a>
+          <a href="${linkUrl}" style="color: #1a73e8; text-decoration: underline; display: block;">当前报价</a>
         </p>
       </div>
     `;
+  
+  const titlePrefix = isPre() ? '[pre]' : '';
+  
+  // 优化标题：黄金售卖 580.5 (↑2.5)
+  const diff = Number(currentValue) - Number(beforeValue);
+  // 保留最多2位小数，去掉末尾的0
+  const diffAbs = Math.abs(diff).toFixed(2).replace(/\.?0+$/, '');
+  const sign = diff > 0 ? '↑' : diff < 0 ? '↓' : '';
+  const diffText = diff !== 0 ? `(${sign}${diffAbs})` : '';
+  
   const payload = {
     token: pushToken,
-    title: `${typeText}价格变动通知`,
+    title: `${titlePrefix}${typeText}${currentValue}${diffText}`,
     content,
     template: 'html',
     topic: pushTopic,
@@ -103,6 +122,10 @@ export function dispatchCurrentPriceNotify(params) {
       message: 'No price list',
     });
   }
+
+  // 构建完整的 URL
+  const base = process.env.VITE_BASE_URL || '/';
+  const linkUrl = `http://hengshang.asia${base}`;
 
   const listHtml = priceList
     .map((item) => {
@@ -155,14 +178,15 @@ export function dispatchCurrentPriceNotify(params) {
         </p>
         <p style="font-size: 14px; margin-top: 5px; color: #555555;">
           <a href="http://ypjgold.cn/show" style="color: #1a73e8; text-decoration: underline; display: block; margin-bottom: 8px;">实时查询</a>
-          <a href="http://47.115.210.76/" style="color: #1a73e8; text-decoration: underline; display: block;">当前报价</a>
+          <a href="${linkUrl}" style="color: #1a73e8; text-decoration: underline; display: block;">当前报价</a>
         </p>
       </div>
     `;
 
+  const titlePrefix = isPre() ? '[pre]' : '';
   const payload = {
     token: pushToken,
-    title: '早9点 金属价格通知',
+    title: `${titlePrefix}早9点 金属价格通知`,
     content,
     template: 'html',
     topic: pushDailyTopic,

@@ -131,7 +131,21 @@ async function getAllMetalRawData(timeParam) {
   }
 }
 
-function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, offsetStep) {
+/**
+ * 判断价格是否发生有效变化（带防抖逻辑）
+ * @param {number} currentPrice - 当前计算出的显示价格
+ * @param {number} prevPrice - 上一次记录的显示价格
+ * @param {number} rawPrice - 当前的原始价格
+ * @param {number} roundStep - 取整步长
+ * @param {number} offsetStep - 偏移量
+ * @param {string} roundingMode - 取整模式：'up' (售卖/向上取整) 或 'down' (回收/向下取整)
+ * 
+ * 注意：roundingMode 决定了使用哪种取整算法(Math.ceil/Math.floor)，
+ * 而内部计算出的 direction 仅代表价格数值的涨跌方向。
+ * 即使回收价上涨(direction='up')，也必须强制使用向下取整(roundingMode='down')算法来计算缓冲后的价格，
+ * 否则会导致防抖逻辑失效（即微小的涨幅被错误的向上取整算法放大）。
+ */
+function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, offsetStep, roundingMode) {
   if (prevPrice === null || prevPrice === undefined) {
     return true;
   }
@@ -150,7 +164,7 @@ function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, of
   if (direction === 'up') {
     // 检查原始金额 -0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
     const newRawValue = rawPrice - 0.25
-    const newValue = getFixedValue(direction, newRawValue, roundStep, offsetStep);
+    const newValue = getFixedValue(roundingMode, newRawValue, roundStep, offsetStep);
     console.log('上涨newValue', newValue, 'currentPrice', currentPrice);
     if(newValue ===currentPrice) {
       return true;
@@ -160,7 +174,7 @@ function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, of
   }
   // 检查原始金额 +0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
   const newRawValue = rawPrice + 0.25
-  const newValue = getFixedValue(direction, newRawValue, roundStep, offsetStep);
+  const newValue = getFixedValue(roundingMode, newRawValue, roundStep, offsetStep);
   console.log('下跌newValue', newValue, 'currentPrice', currentPrice);
   if(newValue ===currentPrice) {
     return true;
@@ -228,8 +242,8 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config, triggeredByConfi
       sellChanged = currentSellPrice !== prevSellPrice;
       recycleChanged = currentRecyclePrice !== prevRecyclePrice;
     } else {
-      sellChanged = isConfirmedPriceChange(currentSellPrice, prevSellPrice, rawSellPrice, config.fixedStep, config.minUp);
-      recycleChanged = isConfirmedPriceChange(currentRecyclePrice, prevRecyclePrice, rawRecyclePrice, config.fixedStep, config.minDown);
+      sellChanged = isConfirmedPriceChange(currentSellPrice, prevSellPrice, rawSellPrice, config.fixedStep, config.minUp, 'up');
+      recycleChanged = isConfirmedPriceChange(currentRecyclePrice, prevRecyclePrice, rawRecyclePrice, config.fixedStep, config.minDown, 'down');
     }
     priceChanged = sellChanged || recycleChanged;
   }
@@ -251,7 +265,7 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config, triggeredByConfi
     console.log(`定时任务：${metalType}价格变化已记录:`, priceRecord);
 
     if (prevSellPrice !== null) {
-      if (currentSellPrice !== prevSellPrice && currentSellPrice !== -1 && prevSellPrice !== -1) {
+      if (sellChanged && currentSellPrice !== -1 && prevSellPrice !== -1) {
         dispatchNotify({
           typeKey,
           metalType,
@@ -262,7 +276,7 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config, triggeredByConfi
           updateTime: rawData.time,
         });
       }
-      if (currentRecyclePrice !== prevRecyclePrice && currentRecyclePrice !== -1 && prevRecyclePrice !== -1) {
+      if (recycleChanged && currentRecyclePrice !== -1 && prevRecyclePrice !== -1) {
         dispatchNotify({
           typeKey,
           metalType,
@@ -831,8 +845,11 @@ let baseUrl = '/';
 try {
   const envConfig = dotenv.parse(fs.readFileSync(path.resolve(__dirname, '../frontend/.env')));
   baseUrl = envConfig.VITE_BASE_URL || '/';
+  // 将前端 Base URL 注入到环境变量中，供其他模块（如 dispatch）使用
+  process.env.VITE_BASE_URL = baseUrl;
 } catch (e) {
   console.log('未找到前端环境变量文件，使用默认路径 /');
+  process.env.VITE_BASE_URL = '/';
 }
 
 // 移除末尾的斜杠，避免路径拼接问题
