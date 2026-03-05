@@ -7,6 +7,7 @@ import fs from 'fs';
 import {
   METAL_TYPES,
   METAL_TYPE_MAP,
+  METAL_KEYS,
   getMetalName,
   getMetalTypeKey,
   getLatestConfig,
@@ -60,7 +61,7 @@ function toDateString(value) {
 }
 
 // 黄金的类型key（用于9点定时任务推送）
-const GOLD_TYPE_KEY = '1_au_1';
+const GOLD_TYPE_KEY = METAL_KEYS.GOLD;
 
 const app = express();
 
@@ -145,7 +146,7 @@ async function getAllMetalRawData(timeParam) {
  * 即使回收价上涨(direction='up')，也必须强制使用向下取整(roundingMode='down')算法来计算缓冲后的价格，
  * 否则会导致防抖逻辑失效（即微小的涨幅被错误的向上取整算法放大）。
  */
-function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, offsetStep, roundingMode) {
+function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, offsetStep, roundingMode, typeKey) {
   if (prevPrice === null || prevPrice === undefined) {
     return true;
   }
@@ -160,25 +161,27 @@ function isConfirmedPriceChange(currentPrice, prevPrice, rawPrice, roundStep, of
   }
 
   const direction = currentPrice > prevPrice ? 'up' : 'down';
+  // 白银的缓冲值为 0.25，其他金属为 1
+  const buffer = typeKey === METAL_KEYS.SILVER ? 0.25 : 1;
 
   if (direction === 'up') {
-    // 检查原始金额 -0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
-    const newRawValue = rawPrice - 0.25
+    // 检查原始金额 -buffer 之后是否依然可以触发金额变化，如果可以 则认为价格变化
+    const newRawValue = rawPrice - buffer;
     const newValue = getFixedValue(roundingMode, newRawValue, roundStep, offsetStep);
-    console.log('上涨newValue', newValue, 'currentPrice', currentPrice);
-    if(newValue ===currentPrice) {
+    // console.log('上涨newValue', newValue, 'currentPrice', currentPrice);
+    if(newValue === currentPrice) {
       return true;
-    }else{
+    } else {
       return false;
     }
   }
-  // 检查原始金额 +0.25 之后是否依然可以触发金额变化，如果可以 则认为价格变化
-  const newRawValue = rawPrice + 0.25
+  // 检查原始金额 +buffer 之后是否依然可以触发金额变化，如果可以 则认为价格变化
+  const newRawValue = rawPrice + buffer;
   const newValue = getFixedValue(roundingMode, newRawValue, roundStep, offsetStep);
-  console.log('下跌newValue', newValue, 'currentPrice', currentPrice);
-  if(newValue ===currentPrice) {
+  // console.log('下跌newValue', newValue, 'currentPrice', currentPrice);
+  if(newValue === currentPrice) {
     return true;
-  }else{
+  } else {
     return false;
   }
 }
@@ -242,8 +245,8 @@ async function checkAndSaveMetalPrice(typeKey, rawData, config, triggeredByConfi
       sellChanged = currentSellPrice !== prevSellPrice;
       recycleChanged = currentRecyclePrice !== prevRecyclePrice;
     } else {
-      sellChanged = isConfirmedPriceChange(currentSellPrice, prevSellPrice, rawSellPrice, config.fixedStep, config.minUp, 'up');
-      recycleChanged = isConfirmedPriceChange(currentRecyclePrice, prevRecyclePrice, rawRecyclePrice, config.fixedStep, config.minDown, 'down');
+      sellChanged = isConfirmedPriceChange(currentSellPrice, prevSellPrice, rawSellPrice, config.fixedStep, config.minUp, 'up', typeKey);
+      recycleChanged = isConfirmedPriceChange(currentRecyclePrice, prevRecyclePrice, rawRecyclePrice, config.fixedStep, config.minDown, 'down', typeKey);
     }
     priceChanged = sellChanged || recycleChanged;
   }

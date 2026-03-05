@@ -9,13 +9,22 @@ const __dirname = path.dirname(__filename);
 // 数据库文件路径
 const dbPath = path.join(__dirname, '../config.db');
 
+// 金属类型键枚举
+const METAL_KEYS = {
+  GOLD: '1_au_1',
+  SILVER: '1_ag_44',
+  PLATINUM: '1_pt_9',
+  PALLADIUM: '1_pd_8',
+  K18_GOLD: '1_au_22',
+};
+
 // 金属类型映射（使用爬取接口的 type 字段作为 key，与接口返回的 type 字段对应）
 const METAL_TYPE_MAP = {
-  '1_au_1': '黄金',       // 黄金 - type字段值
-  '1_ag_44': '白银',     // 白银 - type字段值
-  '1_pt_9': '铂金',      // 铂金 - type字段值
-  '1_pd_8': '钯金',      // 钯金 - type字段值
-  '1_au_22': '18K金',    // 18K饰品 - type字段值
+  [METAL_KEYS.GOLD]: '黄金',       // 黄金 - type字段值
+  [METAL_KEYS.SILVER]: '白银',     // 白银 - type字段值
+  [METAL_KEYS.PLATINUM]: '铂金',      // 铂金 - type字段值
+  [METAL_KEYS.PALLADIUM]: '钯金',      // 钯金 - type字段值
+  [METAL_KEYS.K18_GOLD]: '18K金',    // 18K饰品 - type字段值
 };
 
 // 支持的金属类型列表（type字段值的集合）
@@ -195,7 +204,7 @@ function migrateFromLegacy() {
       const legacyUpdateTime = legacyConfig.updateTime || updateTime;
       
       db.prepare(`INSERT OR REPLACE INTO metal_config (metalType, minUp, minDown, fixedStep, updateTime) VALUES (?, ?, ?, ?, ?)`).run(
-        '1_au_1', minUp, minDown, 5, legacyUpdateTime
+        METAL_KEYS.GOLD, minUp, minDown, 5, legacyUpdateTime
       );
       
       initDefaultMetalConfig();
@@ -307,11 +316,11 @@ function initCustomMetalTable() {
 // 根据金属类型key获取对应的历史表名
 function getTableName(typeKey) {
   const map = {
-    '1_au_1': 'scheduled_gold_prices',
-    '1_ag_44': 'scheduled_silver_prices',
-    '1_pt_9': 'scheduled_platinum_prices',
-    '1_pd_8': 'scheduled_palladium_prices',
-    '1_au_22': 'scheduled_18k_prices'
+    [METAL_KEYS.GOLD]: 'scheduled_gold_prices',
+    [METAL_KEYS.SILVER]: 'scheduled_silver_prices',
+    [METAL_KEYS.PLATINUM]: 'scheduled_platinum_prices',
+    [METAL_KEYS.PALLADIUM]: 'scheduled_palladium_prices',
+    [METAL_KEYS.K18_GOLD]: 'scheduled_18k_prices'
   };
   return map[typeKey] || `scheduled_${typeKey}_prices`;
 }
@@ -319,8 +328,20 @@ function getTableName(typeKey) {
 // 检查是否有默认配置，如果没有则插入
 function initDefaultMetalConfig() {
   // 各金属的默认最小调整幅度
-  const defaultMinUp = { '1_au_1': 10, '1_ag_44': 1, '1_pt_9': 1, '1_pd_8': 1, '1_au_22': 5 };
-  const defaultMinDown = { '1_au_1': 10, '1_ag_44': 1, '1_pt_9': 1, '1_pd_8': 1, '1_au_22': 5 };
+  const defaultMinUp = {
+    [METAL_KEYS.GOLD]: 10,
+    [METAL_KEYS.SILVER]: 1,
+    [METAL_KEYS.PLATINUM]: 1,
+    [METAL_KEYS.PALLADIUM]: 1,
+    [METAL_KEYS.K18_GOLD]: 5
+  };
+  const defaultMinDown = {
+    [METAL_KEYS.GOLD]: 10,
+    [METAL_KEYS.SILVER]: 1,
+    [METAL_KEYS.PLATINUM]: 1,
+    [METAL_KEYS.PALLADIUM]: 1,
+    [METAL_KEYS.K18_GOLD]: 5
+  };
 
   const insertTransaction = db.transaction(() => {
     METAL_TYPES.forEach(typeKey => {
@@ -734,6 +755,7 @@ export {
   db,
   METAL_TYPES,
   METAL_TYPE_MAP,
+  METAL_KEYS,
   getMetalName,
   getMetalTypeKey,
   getLatestConfig,
